@@ -1,6 +1,6 @@
-//go:build scenario
+//go:build integration_test
 
-package scenario
+package integration_test
 
 import (
 	"context"
@@ -37,8 +37,8 @@ type pgContainer struct {
 func startPostgres(t *testing.T, ctx context.Context) *pgContainer {
 	t.Helper()
 	const (
-		user  = "scenariouser"
-		pass  = "scenariopass"
+		user  = "integrationuser"
+		pass  = "integrationpass"
 		bootDB = "postgres"
 	)
 	c, err := tcpg.Run(ctx,
@@ -132,9 +132,9 @@ func shortSocketPath(t *testing.T) string {
 	return p
 }
 
-// scenarioDaemon bundles a running proxy.Server plus its control plane and
+// integrationDaemon bundles a running proxy.Server plus its control plane and
 // records the addresses they listen on.
-type scenarioDaemon struct {
+type integrationDaemon struct {
 	Server   *proxy.Server
 	Control  *control.Server
 	Sock     string
@@ -145,7 +145,7 @@ type scenarioDaemon struct {
 // startDaemon writes cfg to a temp file, constructs Server + Control, starts
 // them, and registers t.Cleanup to tear everything down. The initial target
 // is activated across all databases at proxy.New time.
-func startDaemon(t *testing.T, cfg *config.Config, initialTarget string, vars map[string]string) *scenarioDaemon {
+func startDaemon(t *testing.T, cfg *config.Config, initialTarget string, vars map[string]string) *integrationDaemon {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -179,7 +179,7 @@ func startDaemon(t *testing.T, cfg *config.Config, initialTarget string, vars ma
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	d := &scenarioDaemon{
+	d := &integrationDaemon{
 		Server:  srv,
 		Control: cs,
 		Sock:    cfg.ControlSocket,

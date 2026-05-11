@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 DBPIVOT_PORT=${DBPIVOT_PORT:-6432}
 WEB_PORT=${WEB_PORT:-18080}
@@ -126,7 +126,7 @@ wait_tcp 127.0.0.1 "$DBPIVOT_PORT" "dbpivot"
 echo "[e2e] starting web server..."
 DSN="postgres://anyone:any@127.0.0.1:$DBPIVOT_PORT/appdb?sslmode=disable" \
 ADDR="127.0.0.1:$WEB_PORT" \
-    go run ./scripts/e2e/server &
+    go run ./e2e/server &
 WEB_PID=$!
 wait_tcp 127.0.0.1 "$WEB_PORT" "web server"
 

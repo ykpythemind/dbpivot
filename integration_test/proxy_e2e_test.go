@@ -1,6 +1,6 @@
-//go:build scenario
+//go:build integration_test
 
-package scenario
+package integration_test
 
 import (
 	"context"

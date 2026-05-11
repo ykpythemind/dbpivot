@@ -171,7 +171,8 @@ internal/
   control/   protocol.go           // Req/Res 型
              server.go             // Unix socket サーバ
              client.go             // CLI 側 dial
-scenario/                          // testcontainers ベースの E2E (build tag = scenario)
+integration_test/                  // testcontainers ベースの integration test (build tag = integration_test)
+e2e/                               // docker compose + tiny web server による手動 e2e スクリプト
 ```
 
 依存:
@@ -190,13 +191,13 @@ DB ドライバは抱えない (PG wire は自前)。
 go test ./...
 ```
 
-実 PostgreSQL を立てて行う E2E (Docker 必須):
+実 PostgreSQL を立てて行う integration test (Docker 必須):
 
 ```bash
-go test -tags=scenario ./scenario/...
+go test -tags=integration_test ./integration_test/...
 ```
 
-`scenario/` 配下は `//go:build scenario` で守られているので通常実行では走らない。`testcontainers-go` で Postgres 16 を立て、SCRAM 認証込みで:
+`integration_test/` 配下は `//go:build integration_test` で守られているので通常実行では走らない。`testcontainers-go` で Postgres 16 を立て、SCRAM 認証込みで:
 
 - dbname → database ルーティングと `database` 書き換え
 - use による既存接続の force-close
@@ -205,6 +206,14 @@ go test -tags=scenario ./scenario/...
 - control plane (`status` / `use`)
 
 を verify する。
+
+CLI レイヤを含む e2e は `e2e/run.sh` から走らせる (docker / psql / jq / go 必須):
+
+```bash
+./e2e/run.sh
+```
+
+postgres を 2 つ起動 → スキーマ流して別データ投入 → `dbpivot serve` と tiny web server を起動 → HTTP 経由で SELECT → `dbpivot use` で切替えて差分を確認、を行う。
 
 ## 設計の詳細
 
