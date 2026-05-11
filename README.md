@@ -13,7 +13,7 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時
 
 - **1 ポートで複数 database を多重化**: アプリは `dbname=<virtual_name>` で接続するだけ。proxy が StartupMessage を読んで database ごとの上流に振り分ける。
 - **`database` の動的書き換え**: アプリは常に同じ dbname で繋ぐが、現在の target に設定された実 DB 名で StartupMessage を書き換えて upstream へ送る。
-- **target は環境**: `local` / `staging` / `prod` のように **全 database で共通の target 名集合** を持つ。`dbpivot use <target>` は全 database を同時に切り替える (二相 commit、どれか失敗したら全部やらない)。
+- **target は環境**: `local` / `staging` / `prod` のように database ごとに target 名集合を持つ。`dbpivot use <target>` は **その target を持つ database 全部を同時に切り替える**。target を持たない database は warning ログを出して inactive 化 (= 該当 dbname へ来た client connection は PG ErrorResponse で即返す)。すべての database が target を持たない場合のみ全体エラー。
 - **テンプレート変数**: `app_${BRANCH}_staging` のように書いておき、`use` や `serve` 時に `--var BRANCH=main` で展開。
 - **既存接続の即時切断**: 切替時に該当 database の全接続を force-close。クライアントは再接続するだけで新ターゲットへ。
 - **SCRAM-SHA-256 代理認証**: client → proxy は trust auth、proxy → upstream は SCRAM-SHA-256 で本物の認証。target ごとに user/password を持つ。
@@ -49,7 +49,8 @@ forward_targets:                             # 省略可。inline 派なら不�
     port: 15433
 
 databases:
-  - virtual_name: appdb                      # アプリは dbname=appdb で接続 (= 論理名)
+  - adapter: postgres                        # 必須。v1 では `postgres` のみサポート
+    virtual_name: appdb                      # アプリは dbname=appdb で接続 (= 論理名)
     targets:
       - name: local                          # target 名は全 database で共通必須
         host: 127.0.0.1
@@ -68,7 +69,8 @@ databases:
         password: prod_password
         database: app_${USER}_prod
 
-  - virtual_name: analytics
+  - adapter: postgres
+    virtual_name: analytics
     targets:
       - name: local                          # 同じ target 名集合 {local, staging, prod}
         host: 127.0.0.1
@@ -90,7 +92,8 @@ databases:
 
 ### バリデーション要点
 
-- **全 database は同じ target 名集合を持たなければならない** (例: 全部 `{local, staging, prod}`)。違うと起動時にエラー。
+- 各 database には `adapter` が必須。v1 でサポートされるのは `postgres` のみ (未指定や未知の値は起動時エラー)。
+- 全 database が同じ target 名集合を持つことを推奨 (例: 全部 `{local, staging, prod}`)。違っていても起動はする (warning ログ) — DB が staging にまだ用意できていない、といった移行途中の状態を許容するため。`dbpivot use <target>` 実行時、その target を持たない database は warning を出して inactive 化される (該当 dbname への新規接続は PG ErrorResponse `57P03 "no active target"`)。target を持つ database が 1 つも無ければ全体エラー。
 - target は inline (`host` + `port`) か `forward_to` のどちらか一方 (XOR)。
 - `user`, `password` は target ごとに必須 (SCRAM 代理認証で使う)。
 - `virtual_name` と target の `database` は PG 識別子規則 (`^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$`)。

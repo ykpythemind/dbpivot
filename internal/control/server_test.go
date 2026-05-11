@@ -29,6 +29,7 @@ func setup(t *testing.T) (sockPath string, srv *Server, dm *proxy.Server) {
 		Port: 6432,
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "app_dev"},
@@ -114,6 +115,80 @@ func TestControl_UseUnknownTarget(t *testing.T) {
 	resp, _ := Call(sock, Request{Cmd: CmdUse, Target: "nope"})
 	if resp.OK {
 		t.Fatal("expected error")
+	}
+}
+
+// TestControl_UsePartialSkipsAndInactiveStatus verifies that a `use` against
+// a target only some databases declare succeeds, the skipped database
+// appears in Switched with Skipped=true, and a subsequent `status` reports
+// it as Inactive.
+func TestControl_UsePartialSkipsAndInactiveStatus(t *testing.T) {
+	cfg := &config.Config{
+		Port: 6432,
+		Databases: []config.Database{
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "appdb",
+				Targets: []config.Target{
+					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "app_dev"},
+					{Name: "staging", Host: "127.0.0.1", Port: 5433, User: "u", Password: "p", Database: "app_staging"},
+				},
+			},
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "analytics",
+				Targets: []config.Target{
+					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "an_dev"},
+				},
+			},
+		},
+	}
+	d, err := proxy.New(cfg, "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockPath := shortSocketPath(t)
+	ln, err := Listen(sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(ln, d, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	go srv.Serve()
+
+	resp, err := Call(sockPath, Request{Cmd: CmdUse, Target: "staging"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatalf("not OK: %v", resp.Error)
+	}
+	byName := map[string]SwitchResult{}
+	for _, r := range resp.Switched {
+		byName[r.VirtualName] = r
+	}
+	if r := byName["appdb"]; r.Skipped || r.Current != "staging" {
+		t.Errorf("appdb: %+v (want switched to staging)", r)
+	}
+	if r := byName["analytics"]; !r.Skipped || r.Previous != "local" {
+		t.Errorf("analytics: %+v (want skipped from local)", r)
+	}
+
+	st, err := Call(sockPath, Request{Cmd: CmdStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.OK || st.CurrentTarget != "staging" {
+		t.Fatalf("status: %+v", st)
+	}
+	stByName := map[string]DatabaseStatus{}
+	for _, s := range st.Databases {
+		stByName[s.VirtualName] = s
+	}
+	if s := stByName["appdb"]; s.Inactive || s.Current != "staging" {
+		t.Errorf("appdb status: %+v", s)
+	}
+	if s := stByName["analytics"]; !s.Inactive {
+		t.Errorf("analytics status: %+v (want Inactive)", s)
 	}
 }
 

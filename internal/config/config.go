@@ -41,9 +41,22 @@ type Target struct {
 }
 
 type Database struct {
+	// Adapter selects the wire protocol used for both the client→proxy and
+	// proxy→upstream legs of this database. v1 only supports
+	// AdapterPostgres; the field is required (no default) so configs are
+	// explicit about which protocol they assume.
+	Adapter     string   `yaml:"adapter"`
 	VirtualName string   `yaml:"virtual_name"`
 	Targets     []Target `yaml:"targets"`
 }
+
+// Adapter values. v1 only ships AdapterPostgres; new adapters added later
+// (mysql, mongo, ...) extend this set.
+const AdapterPostgres = "postgres"
+
+// SupportedAdapters lists every adapter the validator accepts. Kept sorted
+// for stable error messages.
+var SupportedAdapters = []string{AdapterPostgres}
 
 type Config struct {
 	Port           int                      `yaml:"port"`
@@ -132,6 +145,13 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 		}
 		seenDatabases[d.VirtualName] = struct{}{}
 
+		if d.Adapter == "" {
+			return fmt.Errorf("database %q: adapter is required (supported: %v)", d.VirtualName, SupportedAdapters)
+		}
+		if !isSupportedAdapter(d.Adapter) {
+			return fmt.Errorf("database %q: unsupported adapter %q (supported: %v)", d.VirtualName, d.Adapter, SupportedAdapters)
+		}
+
 		if len(d.Targets) == 0 {
 			return fmt.Errorf("database %q has no targets", d.VirtualName)
 		}
@@ -186,19 +206,33 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 			}
 		}
 
-		// Cross-database target-set consistency: every database must declare
-		// the exact same set of target names so that `switch <target>` applies
-		// uniformly across all databases.
+		// Cross-database target-set consistency: ideally every database
+		// declares the same set of target names so that `use <target>`
+		// applies uniformly. We only warn here — a target that's not yet
+		// ready on every database is a legitimate in-progress state. Any
+		// actual `use <target>` against a database lacking it still fails
+		// cleanly at SwitchAll-time.
 		names := sortedTargetNames(d.Targets)
 		if i == 0 {
 			canonicalTargets = names
-		} else if !equalStringSlices(names, canonicalTargets) {
-			return fmt.Errorf("database %q has targets %v but first database has %v; all databases must declare the same target set",
-				d.VirtualName, names, canonicalTargets)
+		} else if !equalStringSlices(names, canonicalTargets) && logger != nil {
+			logger.Warn("database declares a different target set than the first database; `use <target>` will fail for databases missing the target",
+				"virtual_name", d.VirtualName,
+				"targets", names,
+				"first_database_targets", canonicalTargets)
 		}
 	}
 
 	return nil
+}
+
+func isSupportedAdapter(s string) bool {
+	for _, a := range SupportedAdapters {
+		if a == s {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedTargetNames(targets []Target) []string {
@@ -223,8 +257,9 @@ func equalStringSlices(a, b []string) bool {
 }
 
 // TargetNames returns the sorted set of target names declared by the first
-// database. Because Validate enforces all databases share the same set, this
-// is the canonical list. Returns nil if cfg has no databases.
+// database. Validate now only *warns* if databases disagree on the target
+// set, so this is a hint — callers that need every per-database set must
+// inspect cfg.Databases directly. Returns nil if cfg has no databases.
 func (cfg *Config) TargetNames() []string {
 	if len(cfg.Databases) == 0 {
 		return nil

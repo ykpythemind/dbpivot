@@ -126,6 +126,7 @@ func TestServer_RouteByDbnameAndRewriteDatabase(t *testing.T) {
 		Port: freePort(t),
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret", Database: "app_real"},
@@ -189,6 +190,7 @@ func TestServer_SSLRequestThenStartup(t *testing.T) {
 		Port: freePort(t),
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret", Database: "app_real"},
@@ -233,6 +235,7 @@ func TestServer_UnknownDatabaseReturnsErrorResponse(t *testing.T) {
 		Port: freePort(t),
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: 1, User: "u", Password: "p", Database: "x"},
@@ -269,6 +272,7 @@ func TestServer_CancelRequestDropped(t *testing.T) {
 		Port: freePort(t),
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: 1, User: "u", Password: "p", Database: "x"},
@@ -304,6 +308,7 @@ func TestServer_EmptyDatabasePassthrough(t *testing.T) {
 		Port: freePort(t),
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret"},
@@ -342,6 +347,7 @@ func TestServer_BidiPipeAfterAuth(t *testing.T) {
 		Port: freePort(t),
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret", Database: "app_real"},
@@ -376,6 +382,149 @@ func TestServer_BidiPipeAfterAuth(t *testing.T) {
 	}
 	if string(buf) != "hello\n" {
 		t.Errorf("echo = %q", buf)
+	}
+}
+
+// TestSwitchAll_SkipsDatabasesMissingTarget builds a Server with two
+// databases — one declaring both local+staging, one declaring only local —
+// and asserts that `use staging` switches the first while clearing the
+// second (Skipped=true, no error).
+func TestSwitchAll_SkipsDatabasesMissingTarget(t *testing.T) {
+	cfg := &config.Config{
+		Port: freePort(t),
+		Databases: []config.Database{
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "appdb",
+				Targets: []config.Target{
+					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "app_dev"},
+					{Name: "staging", Host: "127.0.0.1", Port: 5433, User: "u", Password: "p", Database: "app_staging"},
+				},
+			},
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "analytics",
+				Targets: []config.Target{
+					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "an_dev"},
+				},
+			},
+		},
+	}
+	s, err := New(cfg, "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Both databases declare local — both should be active after New.
+	for _, name := range []string{"appdb", "analytics"} {
+		if _, ok := s.Databases()[name].Current(); !ok {
+			t.Fatalf("%s should be active after init", name)
+		}
+	}
+
+	results, err := s.SwitchAll("staging", nil)
+	if err != nil {
+		t.Fatalf("SwitchAll(staging): %v", err)
+	}
+	resByName := map[string]SwitchResult{}
+	for _, r := range results {
+		resByName[r.VirtualName] = r
+	}
+	if r := resByName["appdb"]; r.Skipped || r.Current != "staging" || r.CurrentDatabase != "app_staging" {
+		t.Errorf("appdb result = %+v", r)
+	}
+	if r := resByName["analytics"]; !r.Skipped || r.Current != "" || r.Previous != "local" {
+		t.Errorf("analytics result = %+v (want skipped from local)", r)
+	}
+
+	// Database state matches: appdb has staging, analytics is inactive.
+	if cur, ok := s.Databases()["appdb"].Current(); !ok || cur.Name != "staging" {
+		t.Errorf("appdb.Current after switch: ok=%v cur=%+v", ok, cur)
+	}
+	if _, ok := s.Databases()["analytics"].Current(); ok {
+		t.Errorf("analytics should be inactive after switch to staging")
+	}
+}
+
+// TestSwitchAll_AllSkippedErrors verifies that `use <bogus>` — where no
+// database declares the target — fails cleanly without mutating state.
+func TestSwitchAll_AllSkippedErrors(t *testing.T) {
+	cfg := &config.Config{
+		Port: freePort(t),
+		Databases: []config.Database{
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "appdb",
+				Targets: []config.Target{
+					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "app_dev"},
+				},
+			},
+		},
+	}
+	s, err := New(cfg, "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.SwitchAll("nonexistent", nil); err == nil {
+		t.Fatal("expected error when no database declares the target")
+	} else if !strings.Contains(err.Error(), "no databases declare") {
+		t.Errorf("error = %v", err)
+	}
+	// State must not have changed.
+	if cur, ok := s.Databases()["appdb"].Current(); !ok || cur.Name != "local" {
+		t.Errorf("appdb should still be on local; got ok=%v cur=%+v", ok, cur)
+	}
+}
+
+// TestSwitchAll_InactiveDatabaseGetsCleanPgError exercises the full
+// handleStartup path: after `use staging` on a database that only declares
+// local, a client connecting through the proxy must receive a PG-protocol
+// ErrorResponse rather than blocking or panicking.
+func TestSwitchAll_InactiveDatabaseGetsCleanPgError(t *testing.T) {
+	cfg := &config.Config{
+		Port: freePort(t),
+		Databases: []config.Database{
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "appdb",
+				Targets: []config.Target{
+					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "app_dev"},
+					{Name: "staging", Host: "127.0.0.1", Port: 5433, User: "u", Password: "p", Database: "app_staging"},
+				},
+			},
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "analytics",
+				Targets: []config.Target{
+					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "an_dev"},
+				},
+			},
+		},
+	}
+	s := startServer(t, cfg)
+	defer s.Shutdown(context.Background())
+
+	if _, err := s.SwitchAll("staging", nil); err != nil {
+		t.Fatalf("SwitchAll: %v", err)
+	}
+
+	c, err := net.Dial("tcp", s.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := SendStartupMessage(c, []KV{{K: "user", V: "u"}, {K: "database", V: "analytics"}}); err != nil {
+		t.Fatal(err)
+	}
+	typ, body, err := ReadMessage(c)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if typ != 'E' {
+		t.Errorf("typ = %c, want E", typ)
+	}
+	if !strings.Contains(string(body), "no active target") {
+		t.Errorf("body = %q, want 'no active target'", body)
 	}
 }
 

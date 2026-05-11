@@ -33,16 +33,25 @@ type SwitchResult struct {
 	VirtualName      string `json:"virtual_name"`
 	Previous         string `json:"previous,omitempty"`
 	PreviousDatabase string `json:"previous_database,omitempty"`
-	Current          string `json:"current"`
-	CurrentDatabase  string `json:"current_database"`
+	Current          string `json:"current,omitempty"`
+	CurrentDatabase  string `json:"current_database,omitempty"`
 	ClosedConns      int    `json:"closed_conns"`
+	// Skipped is true when this database does not declare the requested
+	// target. The database is now inactive; client connections to it will
+	// receive a clean PG ErrorResponse until the next switch lands on a
+	// target it does declare.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 type DatabaseStatus struct {
 	VirtualName     string `json:"virtual_name"`
-	Current         string `json:"current"`
-	CurrentDatabase string `json:"current_database"`
-	CurrentHost     string `json:"current_host"`
-	CurrentPort     int    `json:"current_port"`
+	Current         string `json:"current,omitempty"`
+	CurrentDatabase string `json:"current_database,omitempty"`
+	CurrentHost     string `json:"current_host,omitempty"`
+	CurrentPort     int    `json:"current_port,omitempty"`
 	ActiveConns     int    `json:"active_conns"`
+	// Inactive is true when the database has no current target (e.g. it
+	// was skipped by the last `use <target>` because it does not declare
+	// that target name).
+	Inactive bool `json:"inactive,omitempty"`
 }

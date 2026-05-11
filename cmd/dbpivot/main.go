@@ -196,6 +196,11 @@ func renderUse(resp *control.Response) error {
 		if prev == "" {
 			prev = "-"
 		}
+		if r.Skipped {
+			fmt.Printf("  %s: %s (db=%s) -> SKIPPED (no target %q; database is now inactive, closed %d connection(s))\n",
+				r.VirtualName, prev, r.PreviousDatabase, resp.Target, r.ClosedConns)
+			continue
+		}
 		fmt.Printf("  %s: %s (db=%s) -> %s (db=%s) (closed %d connection(s))\n",
 			r.VirtualName, prev, r.PreviousDatabase,
 			r.Current, r.CurrentDatabase, r.ClosedConns)
@@ -214,6 +219,11 @@ func renderStatus(resp *control.Response) error {
 	}
 	fmt.Printf("listening on 127.0.0.1:%d  current target: %s\n", resp.Port, resp.CurrentTarget)
 	for _, d := range resp.Databases {
+		if d.Inactive {
+			fmt.Printf("  %s -> INACTIVE (no target %q declared; active=%d)\n",
+				d.VirtualName, resp.CurrentTarget, d.ActiveConns)
+			continue
+		}
 		fmt.Printf("  %s -> %s (db=%s upstream=%s:%d active=%d)\n",
 			d.VirtualName, d.Current, d.CurrentDatabase, d.CurrentHost, d.CurrentPort, d.ActiveConns)
 	}

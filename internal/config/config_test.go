@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -13,6 +15,7 @@ func baseCfg() *Config {
 		},
 		Databases: []Database{
 			{
+				Adapter:     AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []Target{
 					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "postgres", Password: "pass", Database: "app_dev"},
@@ -43,6 +46,8 @@ func TestValidate_Errors(t *testing.T) {
 		{"duplicate_virtual_name", func(c *Config) {
 			c.Databases = append(c.Databases, c.Databases[0])
 		}, "duplicate virtual_name"},
+		{"adapter_missing", func(c *Config) { c.Databases[0].Adapter = "" }, "adapter is required"},
+		{"adapter_unsupported", func(c *Config) { c.Databases[0].Adapter = "mongodb" }, "unsupported adapter"},
 		{"no_targets", func(c *Config) { c.Databases[0].Targets = nil }, "no targets"},
 		{"duplicate_target", func(c *Config) {
 			c.Databases[0].Targets = append(c.Databases[0].Targets, c.Databases[0].Targets[0])
@@ -61,16 +66,6 @@ func TestValidate_Errors(t *testing.T) {
 		{"plain_target_database_invalid", func(c *Config) {
 			c.Databases[0].Targets[0].Database = "bad name"
 		}, "not a valid identifier"},
-		{"target_set_mismatch", func(c *Config) {
-			second := Database{
-				VirtualName: "analytics",
-				Targets: []Target{
-					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "an_dev"},
-					// missing "staging" — different target set
-				},
-			}
-			c.Databases = append(c.Databases, second)
-		}, "all databases must declare the same target set"},
 		{"forward_target_bad_port", func(c *Config) {
 			c.ForwardTargets["x"] = ForwardTarget{Host: "h", Port: 0}
 		}, "port out of range"},
@@ -98,6 +93,34 @@ func TestValidate_EmptyTargetDatabaseOK(t *testing.T) {
 	cfg.Databases[0].Targets[0].Database = ""
 	if err := Validate(cfg, nil); err != nil {
 		t.Fatalf("empty target database should validate (with warn), got: %v", err)
+	}
+}
+
+// TestValidate_TargetSetMismatchWarnsOnly verifies that databases with
+// different target sets validate (no error) and that a warning is emitted
+// instead. This is the "DB not ready yet" use case.
+func TestValidate_TargetSetMismatchWarnsOnly(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Databases = append(cfg.Databases, Database{
+		Adapter:     AdapterPostgres,
+		VirtualName: "analytics",
+		Targets: []Target{
+			{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "an_dev"},
+			// missing "staging" — different target set
+		},
+	})
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	if err := Validate(cfg, logger); err != nil {
+		t.Fatalf("target set mismatch should now warn, not error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "different target set") {
+		t.Errorf("expected warning about differing target sets, got: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "analytics") {
+		t.Errorf("expected warning to mention the offending database, got: %q", buf.String())
 	}
 }
 

@@ -102,7 +102,8 @@ port: $DBPIVOT_PORT
 control_socket: $WORK/dbpivot.sock
 
 databases:
-  - virtual_name: appdb
+  - adapter: postgres
+    virtual_name: appdb
     targets:
       - name: local
         host: 127.0.0.1

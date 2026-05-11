@@ -128,6 +128,7 @@ func (s *Server) handleUse(c net.Conn, req *Request) {
 			Current:          r.Current,
 			CurrentDatabase:  r.CurrentDatabase,
 			ClosedConns:      r.ClosedConns,
+			Skipped:          r.Skipped,
 		}
 	}
 	s.writeResp(c, Response{
@@ -141,18 +142,16 @@ func (s *Server) handleStatus(c net.Conn, _ *Request) {
 	target, _ := s.daemon.CurrentTarget()
 	resp := Response{OK: true, Port: s.cfg.Port, CurrentTarget: target}
 	for name, d := range s.daemon.Databases() {
-		cur, ok := d.Current()
-		if !ok {
-			continue
+		ds := DatabaseStatus{VirtualName: name, ActiveConns: d.ActiveConns()}
+		if cur, ok := d.Current(); ok {
+			ds.Current = cur.Name
+			ds.CurrentDatabase = cur.Database
+			ds.CurrentHost = cur.Host
+			ds.CurrentPort = cur.Port
+		} else {
+			ds.Inactive = true
 		}
-		resp.Databases = append(resp.Databases, DatabaseStatus{
-			VirtualName:     name,
-			Current:         cur.Name,
-			CurrentDatabase: cur.Database,
-			CurrentHost:     cur.Host,
-			CurrentPort:     cur.Port,
-			ActiveConns:     d.ActiveConns(),
-		})
+		resp.Databases = append(resp.Databases, ds)
 	}
 	s.writeResp(c, resp)
 }

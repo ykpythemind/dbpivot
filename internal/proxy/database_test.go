@@ -14,6 +14,7 @@ func buildDatabase(t *testing.T) *Database {
 		"ssm-staging": {Host: "127.0.0.1", Port: 15432},
 	}
 	return NewDatabase(config.Database{
+		Adapter:     config.AdapterPostgres,
 		VirtualName: "appdb",
 		Targets: []config.Target{
 			{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "app_dev"},
@@ -120,6 +121,46 @@ func TestApplyClosesExistingConns(t *testing.T) {
 	for _, c := range conns {
 		if _, err := c.Client.Read(make([]byte, 1)); err == nil {
 			t.Errorf("client read should have errored after close")
+		}
+	}
+}
+
+func TestHasTarget(t *testing.T) {
+	d := buildDatabase(t)
+	for _, name := range []string{"local", "staging", "prod"} {
+		if !d.HasTarget(name) {
+			t.Errorf("HasTarget(%q) = false", name)
+		}
+	}
+	if d.HasTarget("qa") {
+		t.Error(`HasTarget("qa") = true`)
+	}
+}
+
+func TestClearDropsCurrentAndConns(t *testing.T) {
+	d := buildDatabase(t)
+	activate(t, d, "local", nil)
+	var conns []*Conn
+	for i := 0; i < 2; i++ {
+		a, _ := net.Pipe()
+		c, _ := net.Pipe()
+		conn := &Conn{Client: a, Upstream: c}
+		d.Register(conn)
+		conns = append(conns, conn)
+	}
+	prev, closed := d.Clear()
+	if prev == nil || prev.Name != "local" {
+		t.Errorf("prev = %+v", prev)
+	}
+	if closed != 2 {
+		t.Errorf("closed = %d, want 2", closed)
+	}
+	if _, ok := d.Current(); ok {
+		t.Errorf("Current should be nil after Clear")
+	}
+	for _, c := range conns {
+		if _, err := c.Client.Read(make([]byte, 1)); err == nil {
+			t.Errorf("client read should have errored after Clear")
 		}
 	}
 }

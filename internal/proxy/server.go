@@ -19,6 +19,10 @@ import (
 const dialTimeout = 5 * time.Second
 
 // SwitchResult captures one database's outcome in a SwitchAll call.
+// When Skipped is true, the database does not declare the requested target;
+// Current / CurrentDatabase are empty and the database is now inactive (any
+// client trying to connect to it receives a PG ErrorResponse until the next
+// `use <target>` lands on a target it does declare).
 type SwitchResult struct {
 	VirtualName      string
 	Previous         string // empty if first activation
@@ -26,6 +30,7 @@ type SwitchResult struct {
 	Current          string
 	CurrentDatabase  string
 	ClosedConns      int
+	Skipped          bool
 }
 
 // Server hosts the single TCP listener and the per-database routing state.
@@ -112,10 +117,14 @@ func (s *Server) IsClosed() bool {
 	return s.closed
 }
 
-// SwitchAll atomically switches every database to the named target. Phase 1
-// resolves all databases (returning early on the first failure so no state
-// is mutated); phase 2 commits the resolved targets and force-closes existing
-// connections. Updates the server-global currentTarget and currentVars.
+// SwitchAll switches every database to the named target. Databases that do
+// not declare the target are warned-and-cleared (their current target is
+// removed; future client connections receive a clean PG error until a
+// subsequent `use` lands them on a target they declare). Databases that DO
+// declare the target are still resolved atomically — if any of them fail to
+// resolve (missing variables, invalid identifier, ...) the whole operation
+// returns without mutating state. If NO database declares the target, the
+// call errors out (almost certainly a typo).
 func (s *Server) SwitchAll(target string, vars map[string]string) ([]SwitchResult, error) {
 	s.mu.RLock()
 	databases := make(map[string]*Database, len(s.databases))
@@ -124,28 +133,48 @@ func (s *Server) SwitchAll(target string, vars map[string]string) ([]SwitchResul
 	}
 	s.mu.RUnlock()
 
-	// Phase 1: resolve every database. On any failure, return the error
-	// without touching state — callers can retry with corrected inputs.
-	plans := make(map[string]ResolvedTarget, len(databases))
+	// Phase 1: classify + resolve. Databases lacking the target are
+	// recorded as "skip"; the rest must resolve cleanly.
+	type plan struct {
+		rt   ResolvedTarget
+		skip bool
+	}
+	plans := make(map[string]plan, len(databases))
+	declared := 0
 	for name, d := range databases {
+		if !d.HasTarget(target) {
+			plans[name] = plan{skip: true}
+			s.logger.Warn("database does not declare requested target; clearing its current target",
+				"virtual_name", name, "target", target)
+			continue
+		}
+		declared++
 		rt, missing, err := d.ResolveTarget(target, vars)
 		if err != nil {
 			return nil, &SwitchPlanError{VirtualName: name, Missing: missing, Err: err}
 		}
-		plans[name] = rt
+		plans[name] = plan{rt: rt}
+	}
+	if declared == 0 {
+		return nil, fmt.Errorf("no databases declare target %q", target)
 	}
 
 	// Phase 2: commit.
 	results := make([]SwitchResult, 0, len(databases))
 	for name, d := range databases {
-		rt := plans[name]
-		prev, closed := d.Apply(rt)
-		r := SwitchResult{
-			VirtualName:     name,
-			Current:         rt.Name,
-			CurrentDatabase: rt.Database,
-			ClosedConns:     closed,
+		p := plans[name]
+		var prev *ResolvedTarget
+		var closed int
+		r := SwitchResult{VirtualName: name}
+		if p.skip {
+			prev, closed = d.Clear()
+			r.Skipped = true
+		} else {
+			prev, closed = d.Apply(p.rt)
+			r.Current = p.rt.Name
+			r.CurrentDatabase = p.rt.Database
 		}
+		r.ClosedConns = closed
 		if prev != nil {
 			r.Previous = prev.Name
 			r.PreviousDatabase = prev.Database

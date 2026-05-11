@@ -29,6 +29,7 @@ func TestScenario_RouteAndRewriteDatabase(t *testing.T) {
 	cfg := &config.Config{
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{
@@ -85,6 +86,7 @@ func TestScenario_SwitchDropsExistingConn(t *testing.T) {
 	cfg := &config.Config{
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
@@ -153,6 +155,7 @@ func TestScenario_UnknownDatabaseErrorResponse(t *testing.T) {
 	cfg := &config.Config{
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
@@ -183,6 +186,7 @@ func TestScenario_Status(t *testing.T) {
 	cfg := &config.Config{
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
@@ -228,6 +232,7 @@ CREATE TABLE items (
 	cfg := &config.Config{
 		Databases: []config.Database{
 			{
+				Adapter:     config.AdapterPostgres,
 				VirtualName: "appdb",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
@@ -318,6 +323,72 @@ func equalRows(a, b []itemRow) bool {
 		}
 	}
 	return true
+}
+
+// TestScenario_SwitchSkipsDatabaseMissingTarget exercises the relaxed
+// validation: appdb declares both local+staging, analytics declares only
+// local. After `use staging`, appdb is on staging and analytics is inactive
+// — a client connecting through the proxy with dbname=analytics gets a
+// clean PG ErrorResponse, while dbname=appdb succeeds.
+func TestScenario_SwitchSkipsDatabaseMissingTarget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	pg := startPostgres(t, ctx)
+	pg.createDatabase(t, ctx, "app_dev")
+	pg.createDatabase(t, ctx, "app_staging")
+	pg.createDatabase(t, ctx, "an_dev")
+
+	cfg := &config.Config{
+		Databases: []config.Database{
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "appdb",
+				Targets: []config.Target{
+					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
+					{Name: "staging", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_staging"},
+				},
+			},
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "analytics",
+				Targets: []config.Target{
+					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "an_dev"},
+				},
+			},
+		},
+	}
+	d := startDaemon(t, cfg, "local", nil)
+
+	resp, err := control.Call(d.Sock, control.Request{Cmd: control.CmdUse, Target: "staging"})
+	if err != nil {
+		t.Fatalf("use staging: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("use staging not OK: %v", resp.Error)
+	}
+	var skipped bool
+	for _, r := range resp.Switched {
+		if r.VirtualName == "analytics" && r.Skipped {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Errorf("analytics should be marked Skipped in switch result: %+v", resp.Switched)
+	}
+
+	// appdb still works through the proxy on staging.
+	if got := queryCurrentDatabase(t, ctx, d.Addr, "appdb"); got != "app_staging" {
+		t.Errorf("appdb current_database = %q, want app_staging", got)
+	}
+
+	// analytics → clean error, not a hang or crash.
+	dsn := fmt.Sprintf("postgres://anyone:any@%s/analytics?sslmode=disable", d.Addr)
+	if _, err := pgx.Connect(ctx, dsn); err == nil {
+		t.Fatal("expected error connecting to inactive analytics")
+	} else if !contains(err.Error(), "no active target") {
+		t.Errorf("error %q does not mention 'no active target'", err.Error())
+	}
 }
 
 func contains(s, sub string) bool {

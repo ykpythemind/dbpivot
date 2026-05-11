@@ -90,6 +90,12 @@ func (d *Database) Current() (ResolvedTarget, bool) {
 // Targets returns the original config Targets (for status/list).
 func (d *Database) Targets() []config.Target { return d.targets }
 
+// HasTarget reports whether this database declares a target with the given name.
+func (d *Database) HasTarget(name string) bool {
+	_, ok := d.byName[name]
+	return ok
+}
+
 // ResolveTarget returns the named target's snapshot after substituting
 // variables into its database template. It does NOT touch d.current — this
 // is the planning phase of a switch.
@@ -125,6 +131,16 @@ func (d *Database) ResolveTarget(name string, vars map[string]string) (ResolvedT
 func (d *Database) Apply(rt ResolvedTarget) (prev *ResolvedTarget, closed int) {
 	prev = d.current.Load()
 	d.current.Store(&rt)
+	closed = d.dropAll()
+	return prev, closed
+}
+
+// Clear atomically removes the current target and force-closes every
+// previously-registered connection. Used when a global `use <target>`
+// targets a name this database doesn't declare — the database becomes
+// inactive and new client connections receive a clean PG error.
+func (d *Database) Clear() (prev *ResolvedTarget, closed int) {
+	prev = d.current.Swap(nil)
 	closed = d.dropAll()
 	return prev, closed
 }
