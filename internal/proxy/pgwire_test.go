@@ -89,7 +89,7 @@ func TestWriteAuthenticationOk(t *testing.T) {
 
 func TestWriteErrorResponse(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteErrorResponse(&buf, "FATAL", "3D000", `pool "foo" not configured`); err != nil {
+	if err := WriteErrorResponse(&buf, "FATAL", "3D000", `database "foo" not configured`); err != nil {
 		t.Fatal(err)
 	}
 	got := buf.Bytes()
@@ -110,7 +110,7 @@ func TestWriteErrorResponse(t *testing.T) {
 	if !bytes.Contains(body, []byte("3D000\x00")) {
 		t.Errorf("missing sqlstate")
 	}
-	if !bytes.Contains(body, []byte(`pool "foo" not configured`)) {
+	if !bytes.Contains(body, []byte(`database "foo" not configured`)) {
 		t.Errorf("missing message")
 	}
 }

@@ -11,10 +11,10 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (default)
 
 ## 何ができる
 
-- **1 ポートで複数 pool を多重化**: アプリは `dbname=<pool-name>` で接続するだけ。proxy が StartupMessage を読んで pool ごとの上流に振り分ける。
+- **1 ポートで複数 database を多重化**: アプリは `dbname=<virtual_name>` で接続するだけ。proxy が StartupMessage を読んで database ごとの上流に振り分ける。
 - **`database` の動的書き換え**: アプリは常に同じ dbname で繋ぐが、現在の target に設定された実 DB 名で StartupMessage を書き換えて upstream へ送る。
 - **テンプレート変数**: `app_${BRANCH}_staging` のように書いておき、`switch` 時に `--var BRANCH=main` で展開。
-- **既存接続の即時切断**: 切替時に該当 pool の全接続を force-close。クライアントは再接続するだけで新ターゲットへ。
+- **既存接続の即時切断**: 切替時に該当 database の全接続を force-close。クライアントは再接続するだけで新ターゲットへ。
 - **SCRAM-SHA-256 代理認証**: client → proxy は trust auth、proxy → upstream は SCRAM-SHA-256 で本物の認証。target ごとに user/password を持つ。
 - **ssm port-forward と相性◎**: `aws ssm start-session --document-name AWS-StartPortForwardingSessionToRemoteHost` 等でローカルに立てた forward 先を `forward_targets` として参照するだけ。ssm 自体は管理しない。
 
@@ -45,8 +45,8 @@ forward_targets:                             # 省略可。inline 派なら不�
     host: 127.0.0.1
     port: 15433
 
-pools:
-  - name: appdb                              # アプリは dbname=appdb で接続
+databases:
+  - virtual_name: appdb                      # アプリは dbname=appdb で接続 (= 論理名)
     default: local
     targets:
       - name: local
@@ -54,7 +54,7 @@ pools:
         port: 5432
         user: postgres
         password: localpass
-        database: app_dev                    # plain (default は variables 不可)
+        database: app_dev                    # 物理 DB 名 (default は variables 不可)
       - name: staging
         forward_to: ssm-staging              # 名前参照
         user: app_staging_user
@@ -66,7 +66,7 @@ pools:
         password: prod_password
         database: app_${USER}_prod
 
-  - name: analytics
+  - virtual_name: analytics
     default: local
     targets:
       - name: local
@@ -82,7 +82,7 @@ pools:
 - `default` target の `database` は `${VAR}` を含めない (起動時に解決手段がないため)。
 - target は inline (`host` + `port`) か `forward_to` のどちらか一方 (XOR)。
 - `user`, `password` は target ごとに必須 (SCRAM 代理認証で使う)。
-- pool 名は PG 識別子規則 (`^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$`)。
+- `virtual_name` と target の `database` は PG 識別子規則 (`^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$`)。
 
 ## 使い方
 
@@ -106,14 +106,14 @@ psql 'host=127.0.0.1 port=6432 user=anyuser dbname=appdb password=anything sslmo
 # → app_dev   (target.database で書き換えられた値)
 ```
 
-`user` と `password` は何でもよい (client → proxy は trust)。`dbname` だけが pool selector として効く。
+`user` と `password` は何でもよい (client → proxy は trust)。`dbname` だけが database selector として効く。
 
 ### CLI
 
 ```
 dbpivot serve   --config PATH [--socket PATH] [--log-level info|debug]
-dbpivot switch  <pool> <target> [--var KEY=VAL]... [--socket PATH] [--json]
-dbpivot status  [<pool>]                            [--socket PATH] [--json]
+dbpivot switch  <database> <target> [--var KEY=VAL]... [--socket PATH] [--json]
+dbpivot status  [<database>]                            [--socket PATH] [--json]
 dbpivot list                                        [--socket PATH] [--json]
 dbpivot reload                                      [--socket PATH] [--json]
 ```
@@ -144,7 +144,7 @@ internal/
   config/    config.go             // YAML ロード + バリデーション
              variables.go          // ${VAR} 展開
   proxy/     server.go             // 単一 TCP listener + accept + 振り分け
-             pool.go               // Pool, Switch, conn registry
+             database.go               // Database, Switch, conn registry
              pgwire.go             // PG メッセージ framing と各種 encode/decode
              auth.go               // upstream SCRAM-SHA-256 driver
   control/   protocol.go           // Req/Res 型
@@ -177,10 +177,10 @@ go test -tags=scenario ./scenario/...
 
 `scenario/` 配下は `//go:build scenario` で守られているので通常実行では走らない。`testcontainers-go` で Postgres 16 を立て、SCRAM 認証込みで:
 
-- dbname → pool ルーティングと `database` 書き換え
+- dbname → database ルーティングと `database` 書き換え
 - switch による既存接続の force-close
 - 同一スキーマ + 別データの切替検証
-- 未知 pool での PG ErrorResponse
+- 未知 database での PG ErrorResponse
 - control plane (`status` / `list` / `switch`)
 
 を verify する。

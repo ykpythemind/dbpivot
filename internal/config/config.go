@@ -9,12 +9,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Identifier matches PostgreSQL-ish identifiers used for pool names and
+// Identifier matches PostgreSQL-ish identifiers used for virtual_name and
 // resolved database values. The leading character must be a letter, digit, or
 // underscore; subsequent characters may also include "$" and "-".
 var identRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$`)
 
-// ValidIdentifier reports whether s is a permitted pool/database identifier.
+// ValidIdentifier reports whether s is a permitted virtual_name / database identifier.
 func ValidIdentifier(s string) bool {
 	return identRE.MatchString(s)
 }
@@ -39,17 +39,17 @@ type Target struct {
 	Database string `yaml:"database,omitempty"`
 }
 
-type Pool struct {
-	Name    string   `yaml:"name"`
-	Default string   `yaml:"default"`
-	Targets []Target `yaml:"targets"`
+type Database struct {
+	VirtualName string   `yaml:"virtual_name"`
+	Default     string   `yaml:"default"`
+	Targets     []Target `yaml:"targets"`
 }
 
 type Config struct {
 	Port           int                      `yaml:"port"`
 	ControlSocket  string                   `yaml:"control_socket"`
 	ForwardTargets map[string]ForwardTarget `yaml:"forward_targets,omitempty"`
-	Pools          []Pool                   `yaml:"pools"`
+	Databases      []Database               `yaml:"databases"`
 }
 
 const DefaultControlSocket = "/tmp/dbpivot.sock"
@@ -92,37 +92,37 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 		}
 	}
 
-	if len(cfg.Pools) == 0 {
-		return fmt.Errorf("at least one pool must be defined")
+	if len(cfg.Databases) == 0 {
+		return fmt.Errorf("at least one database must be defined")
 	}
 
-	seenPools := make(map[string]struct{})
-	for i := range cfg.Pools {
-		p := &cfg.Pools[i]
-		if p.Name == "" {
-			return fmt.Errorf("pools[%d].name is empty", i)
+	seenDatabases := make(map[string]struct{})
+	for i := range cfg.Databases {
+		d := &cfg.Databases[i]
+		if d.VirtualName == "" {
+			return fmt.Errorf("databases[%d].virtual_name is empty", i)
 		}
-		if !ValidIdentifier(p.Name) {
-			return fmt.Errorf("pool name %q is not a valid identifier", p.Name)
+		if !ValidIdentifier(d.VirtualName) {
+			return fmt.Errorf("virtual_name %q is not a valid identifier", d.VirtualName)
 		}
-		if _, dup := seenPools[p.Name]; dup {
-			return fmt.Errorf("duplicate pool name %q", p.Name)
+		if _, dup := seenDatabases[d.VirtualName]; dup {
+			return fmt.Errorf("duplicate virtual_name %q", d.VirtualName)
 		}
-		seenPools[p.Name] = struct{}{}
+		seenDatabases[d.VirtualName] = struct{}{}
 
-		if len(p.Targets) == 0 {
-			return fmt.Errorf("pool %q has no targets", p.Name)
+		if len(d.Targets) == 0 {
+			return fmt.Errorf("database %q has no targets", d.VirtualName)
 		}
 
 		seenTargets := make(map[string]struct{})
 		var defaultTarget *Target
-		for j := range p.Targets {
-			t := &p.Targets[j]
+		for j := range d.Targets {
+			t := &d.Targets[j]
 			if t.Name == "" {
-				return fmt.Errorf("pool %q targets[%d].name is empty", p.Name, j)
+				return fmt.Errorf("database %q targets[%d].name is empty", d.VirtualName, j)
 			}
 			if _, dup := seenTargets[t.Name]; dup {
-				return fmt.Errorf("pool %q has duplicate target name %q", p.Name, t.Name)
+				return fmt.Errorf("database %q has duplicate target name %q", d.VirtualName, t.Name)
 			}
 			seenTargets[t.Name] = struct{}{}
 
@@ -130,56 +130,56 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 			inline := t.Host != "" || t.Port != 0
 			forward := t.ForwardTo != ""
 			if inline && forward {
-				return fmt.Errorf("pool %q target %q: host/port and forward_to are mutually exclusive", p.Name, t.Name)
+				return fmt.Errorf("database %q target %q: host/port and forward_to are mutually exclusive", d.VirtualName, t.Name)
 			}
 			if !inline && !forward {
-				return fmt.Errorf("pool %q target %q: either host+port or forward_to is required", p.Name, t.Name)
+				return fmt.Errorf("database %q target %q: either host+port or forward_to is required", d.VirtualName, t.Name)
 			}
 			if inline {
 				if t.Host == "" {
-					return fmt.Errorf("pool %q target %q: host is required when using inline endpoint", p.Name, t.Name)
+					return fmt.Errorf("database %q target %q: host is required when using inline endpoint", d.VirtualName, t.Name)
 				}
 				if t.Port < 1 || t.Port > 65535 {
-					return fmt.Errorf("pool %q target %q: port out of range: %d", p.Name, t.Name, t.Port)
+					return fmt.Errorf("database %q target %q: port out of range: %d", d.VirtualName, t.Name, t.Port)
 				}
 			} else {
 				if _, ok := cfg.ForwardTargets[t.ForwardTo]; !ok {
-					return fmt.Errorf("pool %q target %q: forward_to %q not defined in forward_targets", p.Name, t.Name, t.ForwardTo)
+					return fmt.Errorf("database %q target %q: forward_to %q not defined in forward_targets", d.VirtualName, t.Name, t.ForwardTo)
 				}
 			}
 
 			if t.User == "" {
-				return fmt.Errorf("pool %q target %q: user is required", p.Name, t.Name)
+				return fmt.Errorf("database %q target %q: user is required", d.VirtualName, t.Name)
 			}
 			if t.Password == "" {
-				return fmt.Errorf("pool %q target %q: password is required", p.Name, t.Name)
+				return fmt.Errorf("database %q target %q: password is required", d.VirtualName, t.Name)
 			}
 
-			if t.Name == p.Default {
+			if t.Name == d.Default {
 				defaultTarget = t
 			}
 		}
 
 		if defaultTarget == nil {
-			return fmt.Errorf("pool %q: default target %q not found in targets", p.Name, p.Default)
+			return fmt.Errorf("database %q: default target %q not found in targets", d.VirtualName, d.Default)
 		}
 
 		if vars := RequiredVars(defaultTarget.Database); len(vars) > 0 {
-			return fmt.Errorf("pool %q default target %q: database must not require variables (found %v)", p.Name, defaultTarget.Name, vars)
+			return fmt.Errorf("database %q default target %q: database must not require variables (found %v)", d.VirtualName, defaultTarget.Name, vars)
 		}
 		if defaultTarget.Database == "" {
 			if logger != nil {
 				logger.Warn("default target has empty database; client-supplied dbname will be passed through",
-					"pool", p.Name, "target", defaultTarget.Name)
+					"virtual_name", d.VirtualName, "target", defaultTarget.Name)
 			}
 		} else if !ValidIdentifier(defaultTarget.Database) {
-			return fmt.Errorf("pool %q default target %q: resolved database %q contains invalid characters", p.Name, defaultTarget.Name, defaultTarget.Database)
+			return fmt.Errorf("database %q default target %q: resolved database %q contains invalid characters", d.VirtualName, defaultTarget.Name, defaultTarget.Database)
 		}
 
 		// Sanity-check non-default targets whose database is a plain string
 		// (no variables): must still be a valid identifier when present.
-		for j := range p.Targets {
-			t := &p.Targets[j]
+		for j := range d.Targets {
+			t := &d.Targets[j]
 			if t == defaultTarget {
 				continue
 			}
@@ -188,7 +188,7 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 			}
 			if len(RequiredVars(t.Database)) == 0 {
 				if !ValidIdentifier(t.Database) {
-					return fmt.Errorf("pool %q target %q: database %q is not a valid identifier", p.Name, t.Name, t.Database)
+					return fmt.Errorf("database %q target %q: database %q is not a valid identifier", d.VirtualName, t.Name, t.Database)
 				}
 			}
 		}

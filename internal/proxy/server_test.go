@@ -124,9 +124,9 @@ func TestServer_RouteByDbnameAndRewriteDatabase(t *testing.T) {
 
 	cfg := &config.Config{
 		Port: freePort(t),
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret", Database: "app_real"},
@@ -188,9 +188,9 @@ func TestServer_SSLRequestThenStartup(t *testing.T) {
 
 	cfg := &config.Config{
 		Port: freePort(t),
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret", Database: "app_real"},
@@ -230,12 +230,12 @@ func TestServer_SSLRequestThenStartup(t *testing.T) {
 	}
 }
 
-func TestServer_UnknownPoolReturnsErrorResponse(t *testing.T) {
+func TestServer_UnknownDatabaseReturnsErrorResponse(t *testing.T) {
 	cfg := &config.Config{
 		Port: freePort(t),
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: 1, User: "u", Password: "p", Database: "x"},
@@ -262,17 +262,17 @@ func TestServer_UnknownPoolReturnsErrorResponse(t *testing.T) {
 	if typ != 'E' {
 		t.Errorf("typ = %c, want E", typ)
 	}
-	if !strings.Contains(string(body), `pool "missing"`) {
-		t.Errorf("body missing pool name: %q", body)
+	if !strings.Contains(string(body), `database "missing"`) {
+		t.Errorf("body missing database name: %q", body)
 	}
 }
 
 func TestServer_CancelRequestDropped(t *testing.T) {
 	cfg := &config.Config{
 		Port: freePort(t),
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: 1, User: "u", Password: "p", Database: "x"},
@@ -306,9 +306,9 @@ func TestServer_EmptyDatabasePassthrough(t *testing.T) {
 
 	cfg := &config.Config{
 		Port: freePort(t),
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret"},
@@ -345,9 +345,9 @@ func TestServer_BidiPipeAfterAuth(t *testing.T) {
 
 	cfg := &config.Config{
 		Port: freePort(t),
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret", Database: "app_real"},

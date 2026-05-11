@@ -15,9 +15,9 @@ import (
 )
 
 // Daemon is the interface the control server expects from the running
-// proxy.Server: it can resolve pools, switch them, and report shutdown.
+// proxy.Server: it can resolve databases, switch them, and report shutdown.
 type Daemon interface {
-	Pools() map[string]*proxy.Pool
+	Databases() map[string]*proxy.Database
 	Addr() string
 	IsClosed() bool
 	Reload() (updated int, dropped int, warnings []string, err error)
@@ -108,18 +108,18 @@ func (s *Server) writeResp(c net.Conn, resp Response) {
 }
 
 func (s *Server) handleSwitch(c net.Conn, req *Request) {
-	if req.Pool == "" || req.Target == "" {
-		s.writeResp(c, Response{OK: false, Error: "pool and target are required"})
+	if req.VirtualName == "" || req.Target == "" {
+		s.writeResp(c, Response{OK: false, Error: "virtual_name and target are required"})
 		return
 	}
-	pool, ok := s.daemon.Pools()[req.Pool]
+	d, ok := s.daemon.Databases()[req.VirtualName]
 	if !ok {
-		s.writeResp(c, Response{OK: false, Error: fmt.Sprintf("unknown pool %q", req.Pool)})
+		s.writeResp(c, Response{OK: false, Error: fmt.Sprintf("unknown virtual_name %q", req.VirtualName)})
 		return
 	}
 
-	prev := pool.Current()
-	prevRt, closedConns, missing, err := pool.Switch(req.Target, req.Variables)
+	prev := d.Current()
+	_, closedConns, missing, err := d.Switch(req.Target, req.Variables)
 	if err != nil {
 		resp := Response{OK: false, Error: err.Error()}
 		if len(missing) > 0 {
@@ -128,12 +128,10 @@ func (s *Server) handleSwitch(c net.Conn, req *Request) {
 		s.writeResp(c, resp)
 		return
 	}
-	// prevRt is the previous; the new state is reflected via pool.Current().
-	cur := pool.Current()
-	_ = prevRt
+	cur := d.Current()
 	s.writeResp(c, Response{
 		OK:               true,
-		Pool:             req.Pool,
+		VirtualName:      req.VirtualName,
 		Previous:         prev.Name,
 		PreviousDatabase: prev.Database,
 		Current:          cur.Name,
@@ -144,22 +142,22 @@ func (s *Server) handleSwitch(c net.Conn, req *Request) {
 
 func (s *Server) handleStatus(c net.Conn, req *Request) {
 	resp := Response{OK: true, Port: s.cfg.Port}
-	for name, pool := range s.daemon.Pools() {
-		if req.Pool != "" && req.Pool != name {
+	for name, d := range s.daemon.Databases() {
+		if req.VirtualName != "" && req.VirtualName != name {
 			continue
 		}
-		cur := pool.Current()
-		resp.Pools = append(resp.Pools, PoolStatus{
-			Name:            name,
+		cur := d.Current()
+		resp.Databases = append(resp.Databases, DatabaseStatus{
+			VirtualName:     name,
 			Current:         cur.Name,
 			CurrentDatabase: cur.Database,
 			CurrentHost:     cur.Host,
 			CurrentPort:     cur.Port,
-			ActiveConns:     pool.ActiveConns(),
+			ActiveConns:     d.ActiveConns(),
 		})
 	}
-	if req.Pool != "" && len(resp.Pools) == 0 {
-		s.writeResp(c, Response{OK: false, Error: fmt.Sprintf("unknown pool %q", req.Pool)})
+	if req.VirtualName != "" && len(resp.Databases) == 0 {
+		s.writeResp(c, Response{OK: false, Error: fmt.Sprintf("unknown virtual_name %q", req.VirtualName)})
 		return
 	}
 	s.writeResp(c, resp)
@@ -173,18 +171,18 @@ func (s *Server) handleList(c net.Conn, _ *Request) {
 			resp.ForwardTargets[name] = ForwardTargetInfo{Host: ft.Host, Port: ft.Port}
 		}
 	}
-	for _, p := range s.cfg.Pools {
-		pool := s.daemon.Pools()[p.Name]
-		pl := PoolList{Name: p.Name, Default: p.Default}
-		if pool != nil {
-			pl.Current = pool.Current().Name
+	for _, cdb := range s.cfg.Databases {
+		d := s.daemon.Databases()[cdb.VirtualName]
+		dl := DatabaseList{VirtualName: cdb.VirtualName, Default: cdb.Default}
+		if d != nil {
+			dl.Current = d.Current().Name
 		}
-		for _, t := range p.Targets {
+		for _, t := range cdb.Targets {
 			vars := config.RequiredVars(t.Database)
 			if vars == nil {
 				vars = []string{}
 			}
-			pl.Targets = append(pl.Targets, TargetInfo{
+			dl.Targets = append(dl.Targets, TargetInfo{
 				Name:              t.Name,
 				Host:              t.Host,
 				Port:              t.Port,
@@ -194,7 +192,7 @@ func (s *Server) handleList(c net.Conn, _ *Request) {
 				RequiredVariables: vars,
 			})
 		}
-		resp.ListPools = append(resp.ListPools, pl)
+		resp.ListDatabases = append(resp.ListDatabases, dl)
 	}
 	s.writeResp(c, resp)
 }
@@ -206,10 +204,10 @@ func (s *Server) handleReload(c net.Conn, _ *Request) {
 		return
 	}
 	s.writeResp(c, Response{
-		OK:           true,
-		PoolsUpdated: updated,
-		DroppedConns: dropped,
-		Warnings:     warnings,
+		OK:               true,
+		DatabasesUpdated: updated,
+		DroppedConns:     dropped,
+		Warnings:         warnings,
 	})
 }
 

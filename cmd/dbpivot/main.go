@@ -115,8 +115,8 @@ func runServe() error {
 
 func switchCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "switch <pool> <target>",
-		Short: "Switch a pool to a target",
+		Use:   "switch <database> <target>",
+		Short: "Switch a database to a target",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vars, err := parseVars(flagVars)
@@ -124,7 +124,7 @@ func switchCmd() *cobra.Command {
 				return err
 			}
 			resp, err := control.Call(flagSocket, control.Request{
-				Cmd: control.CmdSwitch, Pool: args[0], Target: args[1], Variables: vars,
+				Cmd: control.CmdSwitch, VirtualName: args[0], Target: args[1], Variables: vars,
 			})
 			if err != nil {
 				return err
@@ -139,13 +139,13 @@ func switchCmd() *cobra.Command {
 
 func statusCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "status [pool]",
+		Use:   "status [database]",
 		Short: "Show current target(s)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			req := control.Request{Cmd: control.CmdStatus}
 			if len(args) == 1 {
-				req.Pool = args[0]
+				req.VirtualName = args[0]
 			}
 			resp, err := control.Call(flagSocket, req)
 			if err != nil {
@@ -161,7 +161,7 @@ func statusCmd() *cobra.Command {
 func listCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "list",
-		Short: "List pools and their configured targets",
+		Short: "List databases and their configured targets",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resp, err := control.Call(flagSocket, control.Request{Cmd: control.CmdList})
 			if err != nil {
@@ -224,7 +224,7 @@ func renderSwitch(resp *control.Response) error {
 		os.Exit(1)
 	}
 	fmt.Printf("%s: %s (db=%s) -> %s (db=%s) (closed %d connection(s))\n",
-		resp.Pool, resp.Previous, resp.PreviousDatabase,
+		resp.VirtualName, resp.Previous, resp.PreviousDatabase,
 		resp.Current, resp.CurrentDatabase, resp.ClosedConns)
 	return nil
 }
@@ -239,9 +239,9 @@ func renderStatus(resp *control.Response) error {
 		os.Exit(1)
 	}
 	fmt.Printf("listening on 127.0.0.1:%d\n", resp.Port)
-	for _, p := range resp.Pools {
+	for _, d := range resp.Databases {
 		fmt.Printf("  %s -> %s (db=%s upstream=%s:%d active=%d)\n",
-			p.Name, p.Current, p.CurrentDatabase, p.CurrentHost, p.CurrentPort, p.ActiveConns)
+			d.VirtualName, d.Current, d.CurrentDatabase, d.CurrentHost, d.CurrentPort, d.ActiveConns)
 	}
 	return nil
 }
@@ -262,9 +262,9 @@ func renderList(resp *control.Response) error {
 			fmt.Printf("  %s -> %s:%d\n", name, ft.Host, ft.Port)
 		}
 	}
-	for _, pl := range resp.ListPools {
-		fmt.Printf("pool %s (default=%s, current=%s):\n", pl.Name, pl.Default, pl.Current)
-		for _, t := range pl.Targets {
+	for _, dl := range resp.ListDatabases {
+		fmt.Printf("database %s (default=%s, current=%s):\n", dl.VirtualName, dl.Default, dl.Current)
+		for _, t := range dl.Targets {
 			endpoint := ""
 			if t.ForwardTo != "" {
 				endpoint = "forward_to=" + t.ForwardTo
@@ -290,7 +290,7 @@ func renderReload(resp *control.Response) error {
 		fmt.Fprintln(os.Stderr, "error:", resp.Error)
 		os.Exit(1)
 	}
-	fmt.Printf("reloaded: %d pool(s) updated, %d connection(s) dropped\n", resp.PoolsUpdated, resp.DroppedConns)
+	fmt.Printf("reloaded: %d database(s) updated, %d connection(s) dropped\n", resp.DatabasesUpdated, resp.DroppedConns)
 	for _, w := range resp.Warnings {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}

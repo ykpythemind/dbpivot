@@ -18,7 +18,7 @@ import (
 
 const dialTimeout = 5 * time.Second
 
-// Server hosts the single TCP listener and the per-pool routing state.
+// Server hosts the single TCP listener and the per-database routing state.
 type Server struct {
 	addr    string
 	cfgPath string
@@ -26,11 +26,11 @@ type Server struct {
 
 	listener net.Listener
 
-	mu     sync.RWMutex
-	pools  map[string]*Pool
-	cfg    *config.Config
-	closed bool
-	wg     sync.WaitGroup
+	mu        sync.RWMutex
+	databases map[string]*Database
+	cfg       *config.Config
+	closed    bool
+	wg        sync.WaitGroup
 }
 
 // New constructs a Server from validated config. It does not open any
@@ -39,38 +39,38 @@ func New(cfg *config.Config, cfgPath string, logger *slog.Logger) (*Server, erro
 	if logger == nil {
 		logger = slog.Default()
 	}
-	pools := make(map[string]*Pool, len(cfg.Pools))
-	for _, p := range cfg.Pools {
-		pool, err := NewPool(p, cfg.ForwardTargets)
+	databases := make(map[string]*Database, len(cfg.Databases))
+	for _, c := range cfg.Databases {
+		d, err := NewDatabase(c, cfg.ForwardTargets)
 		if err != nil {
 			return nil, err
 		}
-		pools[p.Name] = pool
+		databases[c.VirtualName] = d
 	}
 	return &Server{
-		addr:    net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Port)),
-		cfgPath: cfgPath,
-		pools:   pools,
-		cfg:     cfg,
-		logger:  logger,
+		addr:      net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Port)),
+		cfgPath:   cfgPath,
+		databases: databases,
+		cfg:       cfg,
+		logger:    logger,
 	}, nil
 }
 
-// Pools returns a snapshot of the live pools keyed by name.
-func (s *Server) Pools() map[string]*Pool {
+// Databases returns a snapshot of the live databases keyed by name.
+func (s *Server) Databases() map[string]*Database {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make(map[string]*Pool, len(s.pools))
-	for k, v := range s.pools {
+	out := make(map[string]*Database, len(s.databases))
+	for k, v := range s.databases {
 		out[k] = v
 	}
 	return out
 }
 
-func (s *Server) lookupPool(name string) *Pool {
+func (s *Server) lookupDatabase(name string) *Database {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.pools[name]
+	return s.databases[name]
 }
 
 // Addr returns the listen address.
@@ -101,9 +101,9 @@ func (s *Server) Start() error {
 	s.listener = ln
 	s.mu.Unlock()
 	s.logger.Info("listening", "addr", ln.Addr())
-	for name, p := range s.Pools() {
-		c := p.Current()
-		s.logger.Info("pool ready", "pool", name, "current", c.Name, "database", c.Database, "upstream", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)))
+	for name, d := range s.Databases() {
+		c := d.Current()
+		s.logger.Info("database ready", "virtual_name", name, "current", c.Name, "database", c.Database, "upstream", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)))
 	}
 
 	for {
@@ -131,15 +131,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	s.closed = true
-	pools := s.pools
+	databases := s.databases
 	ln := s.listener
 	s.mu.Unlock()
 
 	if ln != nil {
 		_ = ln.Close()
 	}
-	for _, p := range pools {
-		p.DropAll()
+	for _, d := range databases {
+		d.DropAll()
 	}
 
 	done := make(chan struct{})
@@ -213,14 +213,14 @@ func (s *Server) handleStartup(client net.Conn, br *bufio.Reader, msgLen int) er
 		dbname = LookupParam(params, "user")
 	}
 
-	pool := s.lookupPool(dbname)
-	if pool == nil {
-		_ = WriteErrorResponse(client, "FATAL", "3D000", fmt.Sprintf("pool %q not configured", dbname))
-		s.logger.Info("unknown pool", "dbname", dbname, "remote", client.RemoteAddr())
+	database := s.lookupDatabase(dbname)
+	if database == nil {
+		_ = WriteErrorResponse(client, "FATAL", "3D000", fmt.Sprintf("database %q not configured", dbname))
+		s.logger.Info("unknown database", "dbname", dbname, "remote", client.RemoteAddr())
 		return nil
 	}
 
-	rt := pool.Current()
+	rt := database.Current()
 
 	// Build the upstream StartupMessage: target user, target database (or
 	// pass-through), keep all other client-supplied parameters.
@@ -254,7 +254,7 @@ func (s *Server) handleStartup(client net.Conn, br *bufio.Reader, msgLen int) er
 	if err := AuthenticateUpstream(up, rt.User, rt.Password); err != nil {
 		_ = WriteErrorResponse(client, "FATAL", "28P01", fmt.Sprintf("upstream auth failed: %v", err))
 		up.Close()
-		s.logger.Error("upstream auth", "pool", pool.Name(), "err", err)
+		s.logger.Error("upstream auth", "virtual_name", database.VirtualName(), "err", err)
 		return err
 	}
 
@@ -274,7 +274,7 @@ func (s *Server) handleStartup(client net.Conn, br *bufio.Reader, msgLen int) er
 	}
 
 	conn := &Conn{Client: client, Upstream: up, Resolved: rt}
-	pool.Register(conn)
+	database.Register(conn)
 	defer conn.Close()
 
 	pipeBidi(client, up)
@@ -337,8 +337,8 @@ func SendCancelRequest(w io.Writer, pid, secret uint32) error {
 	return err
 }
 
-// Reload re-reads the config file and swaps in new pool state. All active
-// connections in the affected pools are dropped. Changes to `port` are
+// Reload re-reads the config file and swaps in new database state. All active
+// connections in the affected databases are dropped. Changes to `port` are
 // reported as warnings — port hot-swap is not supported.
 func (s *Server) Reload() (updated int, dropped int, warnings []string, err error) {
 	if s.cfgPath == "" {
@@ -351,37 +351,37 @@ func (s *Server) Reload() (updated int, dropped int, warnings []string, err erro
 
 	s.mu.Lock()
 	oldCfg := s.cfg
-	oldPools := s.pools
+	oldDatabases := s.databases
 	s.mu.Unlock()
 
 	if oldCfg != nil && newCfg.Port != oldCfg.Port {
 		warnings = append(warnings, fmt.Sprintf("port change requires restart (running=%d, config=%d)", oldCfg.Port, newCfg.Port))
 	}
 
-	newPools := make(map[string]*Pool, len(newCfg.Pools))
-	for _, p := range newCfg.Pools {
-		pool, perr := NewPool(p, newCfg.ForwardTargets)
+	newDatabases := make(map[string]*Database, len(newCfg.Databases))
+	for _, c := range newCfg.Databases {
+		d, perr := NewDatabase(c, newCfg.ForwardTargets)
 		if perr != nil {
 			return 0, 0, nil, perr
 		}
-		newPools[p.Name] = pool
+		newDatabases[c.VirtualName] = d
 	}
 
-	for name := range oldPools {
-		if _, ok := newPools[name]; !ok {
-			warnings = append(warnings, fmt.Sprintf("pool %q removed (restart not required for routing changes, but new dbname=%q will be rejected after reload)", name, name))
+	for name := range oldDatabases {
+		if _, ok := newDatabases[name]; !ok {
+			warnings = append(warnings, fmt.Sprintf("database %q removed (restart not required for routing changes, but new dbname=%q will be rejected after reload)", name, name))
 		}
 	}
 
-	for _, p := range oldPools {
-		dropped += p.DropAll()
+	for _, d := range oldDatabases {
+		dropped += d.DropAll()
 	}
 
 	s.mu.Lock()
-	s.pools = newPools
+	s.databases = newDatabases
 	s.cfg = newCfg
 	s.mu.Unlock()
-	return len(newPools), dropped, warnings, nil
+	return len(newDatabases), dropped, warnings, nil
 }
 
 // Config returns the currently loaded config (for control plane listings).

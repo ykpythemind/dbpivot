@@ -11,7 +11,7 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (default)
                                                           →  ssm forward → remote DB
 ```
 
-**v1 は PostgreSQL 専用**。アプリは 1 つのポート (`port:`) に対し、接続時の `database` パラメータに pool 名を書いて接続する。proxy は StartupMessage を読み、pool を選択、target の `user/password/database` で upstream に対して **代理認証** を行い (SCRAM-SHA-256)、認証完了後はバイト pipe。client → proxy は trust auth (任意 password で受け入れる)。
+**v1 は PostgreSQL 専用**。アプリは 1 つのポート (`port:`) に対し、接続時の `database` パラメータに database 名を書いて接続する。proxy は StartupMessage を読み、database を選択、target の `user/password/database` で upstream に対して **代理認証** を行い (SCRAM-SHA-256)、認証完了後はバイト pipe。client → proxy は trust auth (任意 password で受け入れる)。
 
 `database` フィールドはテンプレート (`${VAR}`) を含んで良く、`switch` コマンド時の `--var KEY=VAL` で解決される — ブランチ名やユーザー名で動的に DB を分ける運用に対応するため。
 
@@ -23,7 +23,7 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (default)
 |---|---|
 | 言語 | Go (1.22+, `log/slog`、`atomic.Pointer[T]`) |
 | 対応プロトコル (v1) | **PostgreSQL のみ**。`protocol:` フィールドは v1 では持たない |
-| 単一 listen ポート | top-level `port:` 1 つ。bind 先は `127.0.0.1` 固定。アプリは `dbname=<pool name>` で pool 選択 |
+| 単一 listen ポート | top-level `port:` 1 つ。bind 先は `127.0.0.1` 固定。アプリは `dbname=<database name>` で database 選択 |
 | client → proxy 認証 | **trust** (任意 password で受け入れる)。proxy は client の auth bytes を一切検証しない |
 | proxy → upstream 認証 | **SCRAM-SHA-256** のみサポート (PG 14+ default)。target.user / target.password を proxy が使う |
 | 切替時の既存接続 | **即時切断**。クライアント再接続で新ターゲットへ |
@@ -36,7 +36,7 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (default)
 | target の接続先指定 | inline (host + port) **か** `forward_to: <name>` の **XOR** |
 | variables 対象 | `target.database` のみ。`${VAR}` 形式、値は `--var KEY=VAL` から (環境変数フォールバック無し) |
 | variables 永続性 | 揮発。`switch` ごとに必要な変数を全て明示。不足ならエラー、状態変更なし |
-| 未知 pool 名で接続 | PG ErrorResponse (`pool "foo" not configured`) を返して close |
+| 未知 database 名で接続 | PG ErrorResponse (`database "foo" not configured`) を返して close |
 | CancelRequest | v1 では捨てる (upstream に forward しない、即 close) |
 
 ## ファイル/パッケージ構成
@@ -46,10 +46,10 @@ dbpivot/
   go.mod
   cmd/dbpivot/main.go          // cobra root + サブコマンド
   internal/
-    config/config.go                  // Load, Validate, ForwardTarget, Pool, Target
+    config/config.go                  // Load, Validate, ForwardTarget, Database, Target
     config/variables.go               // RequiredVars / Resolve
-    proxy/server.go                   // 単一 listener + accept + pool routing
-    proxy/pool.go                     // Pool, Switch (target 解決と force close)
+    proxy/server.go                   // 単一 listener + accept + database routing
+    proxy/database.go                     // Database, Switch (target 解決と force close)
     proxy/pgwire.go                   // メッセージ framing、StartupMessage / Authentication* / ErrorResponse
     proxy/auth.go                     // SCRAM-SHA-256 driver (upstream 認証)
     control/protocol.go               // Req/Res 型と cmd 名
@@ -75,8 +75,8 @@ forward_targets:                             # 省略可 (リモート系の共�
     host: 127.0.0.1
     port: 15433
 
-pools:
-  - name: appdb                              # アプリは dbname=appdb で接続
+databases:
+  - virtual_name: appdb                      # アプリは dbname=appdb で接続 (= 論理名)
     default: local
     targets:
       - name: local
@@ -96,7 +96,7 @@ pools:
         password: prod_password_yyy
         database: app_prod
 
-  - name: analytics                          # アプリは dbname=analytics で接続
+  - virtual_name: analytics                  # アプリは dbname=analytics で接続
     default: local
     targets:
       - name: local
@@ -130,7 +130,7 @@ type Target struct {
     Database string `yaml:"database,omitempty"` // ${VAR} 可。空なら pass-through
 }
 
-type Pool struct {
+type Database struct {
     Name    string   `yaml:"name"`
     Default string   `yaml:"default"`
     Targets []Target `yaml:"targets"`
@@ -140,7 +140,7 @@ type Config struct {
     Port           int                      `yaml:"port"`
     ControlSocket  string                   `yaml:"control_socket"`
     ForwardTargets map[string]ForwardTarget `yaml:"forward_targets,omitempty"`
-    Pools          []Pool                   `yaml:"pools"`
+    Databases          []Database                   `yaml:"databases"`
 }
 ```
 
@@ -148,13 +148,13 @@ type Config struct {
 
 1. `port` が `1 ≤ port ≤ 65535`。
 2. `forward_targets` (存在すれば) の各キーが非空、`host` 非空、`port` が `1 ≤ port ≤ 65535`。
-3. `pools` の長さ ≥ 1。`pool.name` 非空、ファイル内で一意。pool 名は `^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$` (クライアントが dbname として送るので PG identifier 範囲)。
-4. `pool.targets` の長さ ≥ 1。`target.name` 非空、pool 内で一意。
+3. `databases` の長さ ≥ 1。`database.name` 非空、ファイル内で一意。database 名は `^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$` (クライアントが dbname として送るので PG identifier 範囲)。
+4. `database.targets` の長さ ≥ 1。`target.name` 非空、database 内で一意。
 5. **target.host/port と target.forward_to は XOR**:
    - inline: `host` と `port` 両方必須、`forward_to` は空
    - forward: `forward_to` 非空かつ `forward_targets` のキーに存在、`host`/`port` は空
 6. `target.user` 非空、`target.password` 非空 (SCRAM に必須)。
-7. `pool.default` が同 pool の `target.name` と一致。
+7. `database.default` が同 database の `target.name` と一致。
 8. **default target の `database` に `${VAR}` を含まないこと** (含めばエラー — daemon 起動時に解決手段が無い)。default 以外は variables 込みでよい。
 9. default target の `database` が空 → WARN: "client-supplied dbname will be passed through"。
 10. `target.database` の解決済み値が `^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$` にマッチすること (default は load 時に静的検査、variables 必須 target は switch 時に検査)。
@@ -192,9 +192,9 @@ func Resolve(s string, vars map[string]string) (resolved string, missing []strin
 2. `RequiredVars(target.Database)` で必要キーを得る。
 3. `Resolve(target.Database, req.Variables)`。missing が空でなければエラー。
 4. 解決済み値が identifier 正規表現にマッチしなければエラー。
-5. ここで初めて `pool.current.Store` と接続強制 close。
+5. ここで初めて `database.current.Store` と接続強制 close。
 
-Pool は `current` として「解決済み Target スナップショット」を保持:
+Database は `current` として「解決済み Target スナップショット」を保持:
 
 ```go
 type ResolvedTarget struct {
@@ -212,13 +212,13 @@ type ResolvedTarget struct {
 ```go
 type Server struct {
     listener net.Listener            // top-level port 1 つ
-    pools    map[string]*Pool        // pool name -> *Pool
+    databases    map[string]*Database        // database name -> *Database
     control  net.Listener
     mu       sync.Mutex
     closed   bool
 }
 
-type Pool struct {
+type Database struct {
     name    string
     targets []Target                 // config 由来 (テンプレート保持)
     byName  map[string]*Target
@@ -237,7 +237,7 @@ type Conn struct {
 ```
 
 - Server は 1 つの accept goroutine。conn ごとに handler goroutine を起動。
-- handler は startup 解析 → pool 引き → upstream dial + SCRAM 認証 → 登録 → bidi pipe。
+- handler は startup 解析 → database 引き → upstream dial + SCRAM 認証 → 登録 → bidi pipe。
 - どちらか終了で `closeOnce.Do(close both + deregister)`。
 - control の dispatch goroutine は別。シリアル処理。
 - シグナル待ち goroutine 1本 (`SIGINT`/`SIGTERM` → `Server.Shutdown`)。
@@ -291,14 +291,14 @@ if err != nil { return err }
 dbname := lookupParam(params, "database")
 if dbname == "" { dbname = lookupParam(params, "user") }  // PG 慣習
 
-pool, ok := server.pools[dbname]
+database, ok := server.databases[dbname]
 if !ok {
     writeErrorResponse(client, "FATAL", "3D000",
-        fmt.Sprintf("pool %q not configured", dbname))
+        fmt.Sprintf("database %q not configured", dbname))
     return nil
 }
 
-rt := pool.current.Load()
+rt := database.current.Load()
 
 // upstream に渡す StartupMessage を組み立て
 upParams := []kv{
@@ -341,7 +341,7 @@ writeAuthenticationOk(client)
 // 以降は bidi pipe で upstream の ParameterStatus / BackendKeyData / ReadyForQuery が
 // 自然に client へ流れる。
 
-return runConn(pool, client, up, *rt)        // pool.conns 登録 + PipeBidi
+return runConn(database, client, up, *rt)        // database.conns 登録 + PipeBidi
 ```
 
 ### 3. `authenticateUpstream` (SCRAM-SHA-256)
@@ -417,12 +417,12 @@ PG ErrorResponse は auth 前でも psql が適切にハンドル。`pgproto3` �
 | `msgLen` 範囲外 | WARN `pg startup: length=%d out of range`、close |
 | `parseStartupBody` 失敗 | WARN `malformed params`、close |
 | 未知 protocol code | WARN `unknown code 0x%08x`、close |
-| 未知 pool 名 | INFO `unknown pool %q from %s`、PG ErrorResponse 後 close |
+| 未知 database 名 | INFO `unknown database %q from %s`、PG ErrorResponse 後 close |
 | 上流 `DialTimeout` 失敗 | ERROR `upstream dial`、PG ErrorResponse 後 close |
 | upstream が SCRAM 以外を要求 | ERROR `unsupported upstream auth method (%d)`、PG ErrorResponse 後 close |
 | SCRAM 認証失敗 (server-final verify) | ERROR `auth failed`、PG ErrorResponse 後 close |
 
-全ての (client, upstream) は `pool.conns` に登録され `closeOnce` 規律下。`switch`/`shutdown` は force-close。
+全ての (client, upstream) は `database.conns` に登録され `closeOnce` 規律下。`switch`/`shutdown` は force-close。
 
 ### 6. v1 で **やらない** こと
 
@@ -437,12 +437,12 @@ PG ErrorResponse は auth 前でも psql が適切にハンドル。`pgproto3` �
 
 ## 切替アルゴリズム (`switch`)
 
-1. `pool.byName[name]` を引く。未知なら error、状態変更なし。
-2. target の host/port を解決 (inline ならそのまま、forward_to なら `pool.fwd[name]` を引く)。
+1. `database.byName[name]` を引く。未知なら error、状態変更なし。
+2. target の host/port を解決 (inline ならそのまま、forward_to なら `database.fwd[name]` を引く)。
 3. `RequiredVars(target.Database)` を取得、variables で全て埋まるか検査。不足ならエラー。
 4. Resolve した database が identifier 正規表現を満たすか検査。
-5. `ResolvedTarget{Name, Host, Port, User, Password, Database}` を組み立て `pool.current.Store(rt)`。
-6. `pool.mu` 取って `conns` のスナップショット (slice) を取り、ロック解放。
+5. `ResolvedTarget{Name, Host, Port, User, Password, Database}` を組み立て `database.current.Store(rt)`。
+6. `database.mu` 取って `conns` のスナップショット (slice) を取り、ロック解放。
 7. snapshot 内の各 `Conn.client/upstream` を Close。残処理 (deregister) は `closeOnce` に任せる。
 
 snapshot 後にロックを離してから close (デッドロック回避)。CLI へは「`previous → current (db=app_main_staging)`、closed N」が確定した段階で応答 (実 close は非同期完了、許容)。
@@ -454,12 +454,12 @@ socket は `0600`、1接続1コマンド (応答後にサーバ側からclose)�
 ### `switch`
 ```json
 // req
-{"cmd":"switch","pool":"appdb","target":"staging","variables":{"BRANCH":"main"}}
+{"cmd":"switch","database":"appdb","target":"staging","variables":{"BRANCH":"main"}}
 // res
-{"ok":true,"pool":"appdb","previous":"local","previous_database":"app_dev",
+{"ok":true,"database":"appdb","previous":"local","previous_database":"app_dev",
  "current":"staging","current_database":"app_main_staging","closed_conns":3}
 // err
-{"ok":false,"error":"unknown target \"qa\" for pool \"appdb\""}
+{"ok":false,"error":"unknown target \"qa\" for database \"appdb\""}
 {"ok":false,"error":"target \"staging\" requires variables: BRANCH","missing":["BRANCH"]}
 {"ok":false,"error":"resolved database \"app foo\" contains invalid characters"}
 ```
@@ -467,9 +467,9 @@ socket は `0600`、1接続1コマンド (応答後にサーバ側からclose)�
 ### `status`
 ```json
 {"cmd":"status"}                                 // 全部
-{"cmd":"status","pool":"appdb"}                  // 個別
+{"cmd":"status","database":"appdb"}                  // 個別
 // res
-{"ok":true,"port":6432,"pools":[
+{"ok":true,"port":6432,"databases":[
   {"name":"appdb","current":"local","current_database":"app_dev",
    "current_host":"127.0.0.1","current_port":5432,"active_conns":2},
   {"name":"analytics","current":"local","current_database":"analytics_dev",
@@ -485,7 +485,7 @@ socket は `0600`、1接続1コマンド (応答後にサーバ側からclose)�
  "forward_targets":{
    "ssm-staging":{"host":"127.0.0.1","port":15432}
  },
- "pools":[
+ "databases":[
   {"name":"appdb","default":"local","current":"local",
    "targets":[
      {"name":"local","host":"127.0.0.1","port":5432,"user":"postgres",
@@ -498,19 +498,19 @@ socket は `0600`、1接続1コマンド (応答後にサーバ側からclose)�
 
 ### `reload`
 
-`--config` を再読み込み、Server の `pools` / `forward_targets` を差し替え。**全 active connections を破棄**。
+`--config` を再読み込み、Server の `databases` / `forward_targets` を差し替え。**全 active connections を破棄**。
 
 - `port` 変更は **再起動を要求** (listener のホットスワップは扱わない、warning に列挙)。
-- pool の追加 / 削除 / target の追加・変更は受け付ける。
+- database の追加 / 削除 / target の追加・変更は受け付ける。
 - `current` の target 名が新configから消えていれば `default` にフォールバック。
 - 新 config の default target が validation 違反なら `ok:false`、running state は無変更。
 
 ```json
 {"cmd":"reload"}
 // res
-{"ok":true,"pools_updated":2,"dropped_conns":5,"warnings":["port 変更は再起動が必要 (running=6432, config=6433)"]}
+{"ok":true,"databases_updated":2,"dropped_conns":5,"warnings":["port 変更は再起動が必要 (running=6432, config=6433)"]}
 // err
-{"ok":false,"error":"validation: pool 'appdb' default 'foo' not in targets"}
+{"ok":false,"error":"validation: database 'appdb' default 'foo' not in targets"}
 ```
 
 ### 未知コマンド
@@ -522,8 +522,8 @@ socket は `0600`、1接続1コマンド (応答後にサーバ側からclose)�
 
 ```
 dbpivot serve   --config PATH [--socket PATH] [--log-level info|debug]
-dbpivot switch  <pool> <target> [--var KEY=VAL]... [--socket PATH] [--json]
-dbpivot status  [<pool>]                            [--socket PATH] [--json]
+dbpivot switch  <database> <target> [--var KEY=VAL]... [--socket PATH] [--json]
+dbpivot status  [<database>]                            [--socket PATH] [--json]
 dbpivot list                                        [--socket PATH] [--json]
 dbpivot reload                                      [--socket PATH] [--json]
 ```
@@ -540,7 +540,7 @@ dbpivot reload                                      [--socket PATH] [--json]
 1. config load + validate。default target の variables 必須違反等あれば exit 1。
 2. `net.Dial("unix", socket)` 試行 — 成功すれば別 daemon あり、`status` を取得して出力し exit 1。
 3. `ENOENT` は無視、`ECONNREFUSED` なら stale → `os.Remove` してから進む。
-4. 各 pool の default target を解決して `ResolvedTarget` を `pool.current` に store。
+4. 各 database の default target を解決して `ResolvedTarget` を `database.current` に store。
 5. `net.Listen("tcp", "127.0.0.1:"+port)`。失敗なら exit 1。
 6. control socket bind (0600)。
 7. accept goroutine 起動。
@@ -551,7 +551,7 @@ dbpivot reload                                      [--socket PATH] [--json]
 
 **shutdown (SIGINT/SIGTERM)**: `Server.Shutdown(ctx, 5s)`:
 1. 主 listener close (accept 停止)。
-2. 全 pool の active conn を switch と同じ snapshot-then-close で close。
+2. 全 database の active conn を switch と同じ snapshot-then-close で close。
 3. control listener close。
 4. `os.Remove(socket)`。
 5. 戻る。main exit 0。
@@ -577,8 +577,8 @@ dbpivot reload                                      [--socket PATH] [--json]
 
 ```yaml
 port: 6432
-pools:
-  - name: appdb
+databases:
+  - virtual_name: appdb
     default: local
     targets:
       - name: local
@@ -596,36 +596,36 @@ pools:
 ```
 
 手順:
-1. `dbpivot serve --config ./config.yaml` → `listening 127.0.0.1:6432`、`pool appdb current=local (db=app_dev)`
+1. `dbpivot serve --config ./config.yaml` → `listening 127.0.0.1:6432`、`database appdb current=local (db=app_dev)`
 2. `psql 'host=127.0.0.1 port=6432 user=anyuser dbname=appdb password=anything sslmode=disable' -At -c 'select current_database()'` → `app_dev` (client password は何でもよい = trust)
 3. `sslmode=prefer` でも同様 (SSLRequest → 'N' 経路)
-4. `psql ... dbname=nonexistent_pool ...` → `psql: error: ... FATAL: pool "nonexistent_pool" not configured`
+4. `psql ... dbname=nonexistent_database ...` → `psql: error: ... FATAL: database "nonexistent_database" not configured`
 5. `dbpivot status` → `current=local, current_database=app_dev`
 6. `dbpivot switch appdb staging` → ERROR `missing variables: BRANCH`
 7. `dbpivot switch appdb staging --var BRANCH=main` → `appdb: local (db=app_dev) -> staging (db=app_main_staging)`
 8. 別タブの psql が切断、再接続で `select current_database()` が `app_main_staging`、`SELECT current_user;` が `postgres` (target.user)
 9. `dbpivot switch appdb staging --var BRANCH=feat-x` → 再切替 (DB が無ければ PG が `database does not exist` を返す。期待挙動)
 10. `dbpivot switch appdb local` → `app_dev` に戻る (variables 不要)
-11. `dbpivot reload` → 対象 pool 全切断、再接続で新設定
+11. `dbpivot reload` → 対象 database 全切断、再接続で新設定
 12. `SIGINT` でクリーン終了、socket ファイル消える
 
 ### 単体テスト
 
 `internal/config/config_test.go`:
-- table-driven: port 未設定 / port 範囲外 / pool 名重複 / pool 名が PG 識別子規則違反 / pools 空 / target.name 重複 / **inline と forward_to 併用 (error)** / **inline で host 欠落 (error)** / forward_to 未定義 / target.user 欠落 / target.password 欠落 / **default target.database に `${VAR}` (error)** / default target.database 空 (warn のみ) / target.database 解決済み値が正規表現にマッチしない
+- table-driven: port 未設定 / port 範囲外 / database 名重複 / database 名が PG 識別子規則違反 / databases 空 / target.name 重複 / **inline と forward_to 併用 (error)** / **inline で host 欠落 (error)** / forward_to 未定義 / target.user 欠落 / target.password 欠落 / **default target.database に `${VAR}` (error)** / default target.database 空 (warn のみ) / target.database 解決済み値が正規表現にマッチしない
 
 `internal/config/variables_test.go`:
 - `RequiredVars`: `"app_${BRANCH}_${USER}"` → `["BRANCH","USER"]`、重複排除、出現順
 - `Resolve`: 正常展開 / missing 列挙 / 余剰 var 許容 / `$$` リテラル / 未閉じ `${BRANCH` でエラー
 
-`internal/proxy/pool_test.go`:
+`internal/proxy/database_test.go`:
 - **TestSwitchUpdatesCurrent**: `Switch("staging", {BRANCH:"main"})` で `Current().Database == "app_main_staging"`
 - **TestSwitchResolvesForwardTo**: forward_to の target を switch すると Current().Host/Port が `forward_targets` の値
 - **TestSwitchClosesExistingConns**: ダミー conn を 3 つ登録 → `Switch` で全て Close される
 - **TestSwitchUnknownTarget**: error、`Current()` 不変
 - **TestSwitchMissingVariables**: variables 必須 target に空 variables → error、`Current()` 不変
 - **TestSwitchInvalidResolvedDatabase**: `app foo` のような空白入り → error
-- **TestRegistryNoLeak**: 100 conn を順次登録/解除、終了時 `len(pool.conns)==0`
+- **TestRegistryNoLeak**: 100 conn を順次登録/解除、終了時 `len(database.conns)==0`
 
 `internal/proxy/pgwire_test.go`:
 - **TestParseEncodeRoundtrip**: 既知 StartupMessage を parse → encode で bytes 一致
@@ -640,9 +640,9 @@ pools:
 - **TestSCRAMUnsupportedMethod**: AuthenticationCleartextPassword (3) や MD5 (5) を返す → "unsupported upstream auth method"
 
 `internal/proxy/server_test.go` (`net.Pipe` or `net.Listen("tcp",":0")` で client/upstream 模擬):
-- **TestRouteByDbname**: 2 つの fake upstream (各々モック SCRAM 応答) を立て、pool A/B を dbname=A/B で接続 → 正しい upstream に届く、それぞれ user/database が target の値に書き換えられている
+- **TestRouteByDbname**: 2 つの fake upstream (各々モック SCRAM 応答) を立て、database A/B を dbname=A/B で接続 → 正しい upstream に届く、それぞれ user/database が target の値に書き換えられている
 - **TestSSLRequestThenStartup**: `[0x00000008, 0x04D2162F]` → client に `'N'`、続けて StartupMessage が処理される
-- **TestUnknownPoolReturnsErrorResponse**: dbname=foo → client が PG ErrorResponse を受け取り conn close
+- **TestUnknownDatabaseReturnsErrorResponse**: dbname=foo → client が PG ErrorResponse を受け取り conn close
 - **TestEmptyTargetDatabasePassthrough**: target.Database 空 → upstream に届く database が client 指定値のまま
 - **TestCancelRequestDropped**: `[0x00000010, 0x04D2162E, pid, secret]` → 何も upstream に送られず、client conn close
 - **TestPreambleLoopBound**: SSLRequest 2 連続 → 2 回目で error
@@ -659,7 +659,7 @@ pools:
 - `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/config/config.go`
 - `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/config/variables.go`
 - `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/proxy/server.go`
-- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/proxy/pool.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/proxy/database.go`
 - `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/proxy/pgwire.go`
 - `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/proxy/auth.go`
 - `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/control/protocol.go`

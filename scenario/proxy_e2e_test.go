@@ -17,7 +17,7 @@ import (
 
 // TestScenario_RouteAndRewriteDatabase brings up a real Postgres, creates
 // two databases on it, and verifies that connecting to the proxy with
-// dbname=<pool-name> ends up on the target's configured database.
+// dbname=<database-name> ends up on the target's configured database.
 func TestScenario_RouteAndRewriteDatabase(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -27,9 +27,9 @@ func TestScenario_RouteAndRewriteDatabase(t *testing.T) {
 	pg.createDatabase(t, ctx, "app_main_staging")
 
 	cfg := &config.Config{
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{
@@ -52,7 +52,7 @@ func TestScenario_RouteAndRewriteDatabase(t *testing.T) {
 	}
 
 	resp, err := control.Call(d.Sock, control.Request{
-		Cmd: control.CmdSwitch, Pool: "appdb", Target: "staging",
+		Cmd: control.CmdSwitch, VirtualName: "appdb", Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -84,9 +84,9 @@ func TestScenario_SwitchDropsExistingConn(t *testing.T) {
 	pg.createDatabase(t, ctx, "app_main_staging")
 
 	cfg := &config.Config{
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
@@ -114,7 +114,7 @@ func TestScenario_SwitchDropsExistingConn(t *testing.T) {
 	}
 
 	resp, err := control.Call(d.Sock, control.Request{
-		Cmd: control.CmdSwitch, Pool: "appdb", Target: "staging",
+		Cmd: control.CmdSwitch, VirtualName: "appdb", Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -142,10 +142,10 @@ func TestScenario_SwitchDropsExistingConn(t *testing.T) {
 	}
 }
 
-// TestScenario_UnknownPoolErrorResponse verifies that connecting with a
-// dbname that isn't a configured pool yields a clean PG-protocol
+// TestScenario_UnknownDatabaseErrorResponse verifies that connecting with a
+// dbname that isn't a configured database yields a clean PG-protocol
 // ErrorResponse (visible as a normal pgx connect error).
-func TestScenario_UnknownPoolErrorResponse(t *testing.T) {
+func TestScenario_UnknownDatabaseErrorResponse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -153,9 +153,9 @@ func TestScenario_UnknownPoolErrorResponse(t *testing.T) {
 	pg.createDatabase(t, ctx, "app_dev")
 
 	cfg := &config.Config{
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
@@ -168,7 +168,7 @@ func TestScenario_UnknownPoolErrorResponse(t *testing.T) {
 	dsn := fmt.Sprintf("postgres://anyone:any@%s/nonexistent?sslmode=disable", d.Addr)
 	_, err := pgx.Connect(ctx, dsn)
 	if err == nil {
-		t.Fatal("expected connect error for unknown pool")
+		t.Fatal("expected connect error for unknown database")
 	}
 	if !contains(err.Error(), "not configured") {
 		t.Errorf("error %q does not mention 'not configured'", err.Error())
@@ -185,9 +185,9 @@ func TestScenario_StatusAndList(t *testing.T) {
 	pg.createDatabase(t, ctx, "app_dev")
 
 	cfg := &config.Config{
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
@@ -202,7 +202,7 @@ func TestScenario_StatusAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !st.OK || len(st.Pools) != 1 || st.Pools[0].Current != "local" {
+	if !st.OK || len(st.Databases) != 1 || st.Databases[0].Current != "local" {
 		t.Fatalf("status = %+v", st)
 	}
 
@@ -210,10 +210,10 @@ func TestScenario_StatusAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !lst.OK || len(lst.ListPools) != 1 {
+	if !lst.OK || len(lst.ListDatabases) != 1 {
 		t.Fatalf("list = %+v", lst)
 	}
-	if got := lst.ListPools[0].Targets[1].RequiredVariables; len(got) != 1 || got[0] != "BRANCH" {
+	if got := lst.ListDatabases[0].Targets[1].RequiredVariables; len(got) != 1 || got[0] != "BRANCH" {
 		t.Errorf("required_variables = %v", got)
 	}
 }
@@ -242,9 +242,9 @@ CREATE TABLE items (
 	pg.exec(t, ctx, "app_main_staging", `INSERT INTO items VALUES (10, 'staging-gamma'), (20, 'staging-delta'), (30, 'staging-epsilon')`)
 
 	cfg := &config.Config{
-		Pools: []config.Pool{
+		Databases: []config.Database{
 			{
-				Name:    "appdb",
+				VirtualName: "appdb",
 				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
@@ -264,7 +264,7 @@ CREATE TABLE items (
 
 	// 2. Switch to staging.
 	resp, err := control.Call(d.Sock, control.Request{
-		Cmd: control.CmdSwitch, Pool: "appdb", Target: "staging",
+		Cmd: control.CmdSwitch, VirtualName: "appdb", Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -282,7 +282,7 @@ CREATE TABLE items (
 	}
 
 	// 4. Switch back, confirm we see the dev dataset again.
-	if _, err := control.Call(d.Sock, control.Request{Cmd: control.CmdSwitch, Pool: "appdb", Target: "local"}); err != nil {
+	if _, err := control.Call(d.Sock, control.Request{Cmd: control.CmdSwitch, VirtualName: "appdb", Target: "local"}); err != nil {
 		t.Fatal(err)
 	}
 	if rows := selectItems(t, ctx, d.Addr, "appdb"); !equalRows(rows, []itemRow{

@@ -26,10 +26,10 @@ type Conn struct {
 	Upstream  net.Conn
 	Resolved  ResolvedTarget
 	closeOnce sync.Once
-	pool      *Pool
+	database  *Database
 }
 
-// Close shuts down both ends of the connection and deregisters from the pool.
+// Close shuts down both ends of the connection and deregisters from the database.
 // Safe to call concurrently and multiple times.
 func (c *Conn) Close() {
 	c.closeOnce.Do(func() {
@@ -39,20 +39,20 @@ func (c *Conn) Close() {
 		if c.Upstream != nil {
 			_ = c.Upstream.Close()
 		}
-		if c.pool != nil {
-			c.pool.deregister(c)
+		if c.database != nil {
+			c.database.deregister(c)
 		}
 	})
 }
 
-// Pool holds the routing state for one logical pool (= one dbname clients
-// connect with). Targets and the forward map are immutable after creation
-// (use Replace under the Server's coordination to swap them on reload).
-type Pool struct {
-	name    string
-	targets []config.Target
-	byName  map[string]*config.Target
-	fwd     map[string]config.ForwardTarget
+// Database holds the routing state for one logical database (= one dbname
+// clients connect with). Targets and the forward map are immutable after
+// creation (use Replace under the Server's coordination to swap them on reload).
+type Database struct {
+	virtualName string
+	targets     []config.Target
+	byName      map[string]*config.Target
+	fwd         map[string]config.ForwardTarget
 
 	current atomic.Pointer[ResolvedTarget]
 
@@ -60,21 +60,21 @@ type Pool struct {
 	conns map[*Conn]struct{}
 }
 
-func NewPool(p config.Pool, fwd map[string]config.ForwardTarget) (*Pool, error) {
-	out := &Pool{
-		name:    p.Name,
-		targets: append([]config.Target(nil), p.Targets...),
-		byName:  make(map[string]*config.Target, len(p.Targets)),
-		fwd:     fwd,
-		conns:   make(map[*Conn]struct{}),
+func NewDatabase(c config.Database, fwd map[string]config.ForwardTarget) (*Database, error) {
+	out := &Database{
+		virtualName: c.VirtualName,
+		targets:     append([]config.Target(nil), c.Targets...),
+		byName:      make(map[string]*config.Target, len(c.Targets)),
+		fwd:         fwd,
+		conns:       make(map[*Conn]struct{}),
 	}
 	for i := range out.targets {
 		out.byName[out.targets[i].Name] = &out.targets[i]
 	}
 
-	def := out.byName[p.Default]
+	def := out.byName[c.Default]
 	if def == nil {
-		return nil, fmt.Errorf("pool %q: default target %q missing", p.Name, p.Default)
+		return nil, fmt.Errorf("database %q: default target %q missing", c.VirtualName, c.Default)
 	}
 	host, port := def.ResolveEndpoint(fwd)
 	out.current.Store(&ResolvedTarget{
@@ -88,21 +88,21 @@ func NewPool(p config.Pool, fwd map[string]config.ForwardTarget) (*Pool, error) 
 	return out, nil
 }
 
-// Name returns the pool name.
-func (p *Pool) Name() string { return p.name }
+// VirtualName returns the configured virtual_name (= the dbname clients connect with).
+func (d *Database) VirtualName() string { return d.virtualName }
 
 // Current returns the active resolved target.
-func (p *Pool) Current() ResolvedTarget { return *p.current.Load() }
+func (d *Database) Current() ResolvedTarget { return *d.current.Load() }
 
 // Targets returns the original config Targets (for status/list).
-func (p *Pool) Targets() []config.Target { return p.targets }
+func (d *Database) Targets() []config.Target { return d.targets }
 
 // ResolveTarget returns the named target's snapshot after substituting
-// variables into its database template. It does NOT touch p.current.
-func (p *Pool) ResolveTarget(name string, vars map[string]string) (ResolvedTarget, []string, error) {
-	t, ok := p.byName[name]
+// variables into its database template. It does NOT touch d.current.
+func (d *Database) ResolveTarget(name string, vars map[string]string) (ResolvedTarget, []string, error) {
+	t, ok := d.byName[name]
 	if !ok {
-		return ResolvedTarget{}, nil, fmt.Errorf("unknown target %q for pool %q", name, p.name)
+		return ResolvedTarget{}, nil, fmt.Errorf("unknown target %q for database %q", name, d.virtualName)
 	}
 	resolvedDB, missing, err := config.Resolve(t.Database, vars)
 	if err != nil && len(missing) > 0 {
@@ -114,7 +114,7 @@ func (p *Pool) ResolveTarget(name string, vars map[string]string) (ResolvedTarge
 	if resolvedDB != "" && !config.ValidIdentifier(resolvedDB) {
 		return ResolvedTarget{}, nil, fmt.Errorf("resolved database %q contains invalid characters", resolvedDB)
 	}
-	host, port := t.ResolveEndpoint(p.fwd)
+	host, port := t.ResolveEndpoint(d.fwd)
 	return ResolvedTarget{
 		Name:     t.Name,
 		Host:     host,
@@ -128,41 +128,41 @@ func (p *Pool) ResolveTarget(name string, vars map[string]string) (ResolvedTarge
 // Switch atomically updates current to the named target (with variables) and
 // closes all currently registered connections. Returns the previous resolved
 // target and how many connections were closed.
-func (p *Pool) Switch(name string, vars map[string]string) (prev ResolvedTarget, closed int, missing []string, err error) {
-	rt, miss, err := p.ResolveTarget(name, vars)
+func (d *Database) Switch(name string, vars map[string]string) (prev ResolvedTarget, closed int, missing []string, err error) {
+	rt, miss, err := d.ResolveTarget(name, vars)
 	if err != nil {
 		return ResolvedTarget{}, 0, miss, err
 	}
-	prev = *p.current.Load()
-	p.current.Store(&rt)
-	closed = p.dropAll()
+	prev = *d.current.Load()
+	d.current.Store(&rt)
+	closed = d.dropAll()
 	return prev, closed, nil, nil
 }
 
-// Register adds c to the active set under p.mu.
-func (p *Pool) Register(c *Conn) {
-	c.pool = p
-	p.mu.Lock()
-	p.conns[c] = struct{}{}
-	p.mu.Unlock()
+// Register adds c to the active set under d.mu.
+func (d *Database) Register(c *Conn) {
+	c.database = d
+	d.mu.Lock()
+	d.conns[c] = struct{}{}
+	d.mu.Unlock()
 }
 
-func (p *Pool) deregister(c *Conn) {
-	p.mu.Lock()
-	delete(p.conns, c)
-	p.mu.Unlock()
+func (d *Database) deregister(c *Conn) {
+	d.mu.Lock()
+	delete(d.conns, c)
+	d.mu.Unlock()
 }
 
 // dropAll force-closes every registered connection. It snapshots the set
 // under the lock, then closes outside the lock to avoid deadlocking with the
-// deregistration path that also takes p.mu.
-func (p *Pool) dropAll() int {
-	p.mu.Lock()
-	snapshot := make([]*Conn, 0, len(p.conns))
-	for c := range p.conns {
+// deregistration path that also takes d.mu.
+func (d *Database) dropAll() int {
+	d.mu.Lock()
+	snapshot := make([]*Conn, 0, len(d.conns))
+	for c := range d.conns {
 		snapshot = append(snapshot, c)
 	}
-	p.mu.Unlock()
+	d.mu.Unlock()
 
 	for _, c := range snapshot {
 		c.Close()
@@ -171,11 +171,11 @@ func (p *Pool) dropAll() int {
 }
 
 // ActiveConns returns the current number of registered connections.
-func (p *Pool) ActiveConns() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.conns)
+func (d *Database) ActiveConns() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.conns)
 }
 
 // DropAll exposes dropAll for the Server's shutdown path.
-func (p *Pool) DropAll() int { return p.dropAll() }
+func (d *Database) DropAll() int { return d.dropAll() }

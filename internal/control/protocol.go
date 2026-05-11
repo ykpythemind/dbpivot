@@ -10,10 +10,10 @@ const (
 // Request is the wire format sent by the CLI to the daemon over the Unix
 // socket (one JSON object per line).
 type Request struct {
-	Cmd       string            `json:"cmd"`
-	Pool      string            `json:"pool,omitempty"`
-	Target    string            `json:"target,omitempty"`
-	Variables map[string]string `json:"variables,omitempty"`
+	Cmd         string            `json:"cmd"`
+	VirtualName string            `json:"virtual_name,omitempty"`
+	Target      string            `json:"target,omitempty"`
+	Variables   map[string]string `json:"variables,omitempty"`
 }
 
 // Response is the wire format the daemon writes back.
@@ -22,7 +22,7 @@ type Response struct {
 	Error string `json:"error,omitempty"`
 
 	// `switch`
-	Pool             string   `json:"pool,omitempty"`
+	VirtualName      string   `json:"virtual_name,omitempty"`
 	Previous         string   `json:"previous,omitempty"`
 	PreviousDatabase string   `json:"previous_database,omitempty"`
 	Current          string   `json:"current,omitempty"`
@@ -31,21 +31,21 @@ type Response struct {
 	Missing          []string `json:"missing,omitempty"`
 
 	// `status`
-	Port  int          `json:"port,omitempty"`
-	Pools []PoolStatus `json:"pools,omitempty"`
+	Port      int              `json:"port,omitempty"`
+	Databases []DatabaseStatus `json:"databases,omitempty"`
 
-	// `list` (also reuses Pools above for status info)
+	// `list` (also reuses Databases above for status info)
 	ForwardTargets map[string]ForwardTargetInfo `json:"forward_targets,omitempty"`
-	ListPools      []PoolList                   `json:"list_pools,omitempty"`
+	ListDatabases  []DatabaseList               `json:"list_databases,omitempty"`
 
 	// `reload`
-	PoolsUpdated int      `json:"pools_updated,omitempty"`
-	DroppedConns int      `json:"dropped_conns,omitempty"`
-	Warnings     []string `json:"warnings,omitempty"`
+	DatabasesUpdated int      `json:"databases_updated,omitempty"`
+	DroppedConns     int      `json:"dropped_conns,omitempty"`
+	Warnings         []string `json:"warnings,omitempty"`
 }
 
-type PoolStatus struct {
-	Name            string `json:"name"`
+type DatabaseStatus struct {
+	VirtualName     string `json:"virtual_name"`
 	Current         string `json:"current"`
 	CurrentDatabase string `json:"current_database"`
 	CurrentHost     string `json:"current_host"`
@@ -53,11 +53,11 @@ type PoolStatus struct {
 	ActiveConns     int    `json:"active_conns"`
 }
 
-type PoolList struct {
-	Name    string       `json:"name"`
-	Default string       `json:"default"`
-	Current string       `json:"current"`
-	Targets []TargetInfo `json:"targets"`
+type DatabaseList struct {
+	VirtualName string       `json:"virtual_name"`
+	Default     string       `json:"default"`
+	Current     string       `json:"current"`
+	Targets     []TargetInfo `json:"targets"`
 }
 
 type TargetInfo struct {
