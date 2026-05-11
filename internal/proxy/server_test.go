@@ -89,7 +89,7 @@ func (fu *fakeUpstream) close() { fu.ln.Close() }
 
 func startServer(t *testing.T, cfg *config.Config) *Server {
 	t.Helper()
-	s, err := New(cfg, "", "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s, err := New(cfg, "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

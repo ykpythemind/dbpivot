@@ -22,7 +22,6 @@ type Daemon interface {
 	SwitchAll(target string, vars map[string]string) ([]proxy.SwitchResult, error)
 	Addr() string
 	IsClosed() bool
-	Reload() (updated int, dropped int, warnings []string, err error)
 }
 
 // Server hosts the Unix-socket admin endpoint.
@@ -86,14 +85,10 @@ func (s *Server) handle(c net.Conn) {
 	}
 
 	switch req.Cmd {
-	case CmdSwitch:
-		s.handleSwitch(c, &req)
+	case CmdUse:
+		s.handleUse(c, &req)
 	case CmdStatus:
 		s.handleStatus(c, &req)
-	case CmdList:
-		s.handleList(c, &req)
-	case CmdReload:
-		s.handleReload(c, &req)
 	default:
 		s.writeResp(c, Response{OK: false, Error: fmt.Sprintf("unknown command: %s", req.Cmd)})
 	}
@@ -109,7 +104,7 @@ func (s *Server) writeResp(c net.Conn, resp Response) {
 	_, _ = c.Write(out)
 }
 
-func (s *Server) handleSwitch(c net.Conn, req *Request) {
+func (s *Server) handleUse(c net.Conn, req *Request) {
 	if req.Target == "" {
 		s.writeResp(c, Response{OK: false, Error: "target is required"})
 		return
@@ -142,13 +137,10 @@ func (s *Server) handleSwitch(c net.Conn, req *Request) {
 	})
 }
 
-func (s *Server) handleStatus(c net.Conn, req *Request) {
+func (s *Server) handleStatus(c net.Conn, _ *Request) {
 	target, _ := s.daemon.CurrentTarget()
 	resp := Response{OK: true, Port: s.cfg.Port, CurrentTarget: target}
 	for name, d := range s.daemon.Databases() {
-		if req.VirtualName != "" && req.VirtualName != name {
-			continue
-		}
 		cur, ok := d.Current()
 		if !ok {
 			continue
@@ -162,55 +154,7 @@ func (s *Server) handleStatus(c net.Conn, req *Request) {
 			ActiveConns:     d.ActiveConns(),
 		})
 	}
-	if req.VirtualName != "" && len(resp.Databases) == 0 {
-		s.writeResp(c, Response{OK: false, Error: fmt.Sprintf("unknown virtual_name %q", req.VirtualName)})
-		return
-	}
 	s.writeResp(c, resp)
-}
-
-func (s *Server) handleList(c net.Conn, _ *Request) {
-	resp := Response{OK: true, Port: s.cfg.Port, TargetNames: s.cfg.TargetNames()}
-	if len(s.cfg.ForwardTargets) > 0 {
-		resp.ForwardTargets = make(map[string]ForwardTargetInfo, len(s.cfg.ForwardTargets))
-		for name, ft := range s.cfg.ForwardTargets {
-			resp.ForwardTargets[name] = ForwardTargetInfo{Host: ft.Host, Port: ft.Port}
-		}
-	}
-	for _, cdb := range s.cfg.Databases {
-		dl := DatabaseList{VirtualName: cdb.VirtualName}
-		for _, t := range cdb.Targets {
-			vars := config.RequiredVars(t.Database)
-			if vars == nil {
-				vars = []string{}
-			}
-			dl.Targets = append(dl.Targets, TargetInfo{
-				Name:              t.Name,
-				Host:              t.Host,
-				Port:              t.Port,
-				ForwardTo:         t.ForwardTo,
-				User:              t.User,
-				DatabaseTemplate:  t.Database,
-				RequiredVariables: vars,
-			})
-		}
-		resp.ListDatabases = append(resp.ListDatabases, dl)
-	}
-	s.writeResp(c, resp)
-}
-
-func (s *Server) handleReload(c net.Conn, _ *Request) {
-	updated, dropped, warnings, err := s.daemon.Reload()
-	if err != nil {
-		s.writeResp(c, Response{OK: false, Error: err.Error()})
-		return
-	}
-	s.writeResp(c, Response{
-		OK:               true,
-		DatabasesUpdated: updated,
-		DroppedConns:     dropped,
-		Warnings:         warnings,
-	})
 }
 
 // TryProbe attempts to connect to an existing daemon at socketPath; returns

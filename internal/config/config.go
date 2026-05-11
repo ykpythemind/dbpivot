@@ -52,7 +52,28 @@ type Config struct {
 	Databases      []Database               `yaml:"databases"`
 }
 
-const DefaultControlSocket = "/tmp/dbpivot.sock"
+const (
+	DefaultControlSocket = "/tmp/dbpivot.sock"
+	DefaultConfigPath    = ".dbpivot.yml"
+)
+
+// LoadSocketPath reads `control_socket` from the YAML at path without running
+// full validation, falling back to DefaultControlSocket if the file is
+// missing or has no socket override. Used by CLI subcommands that only need
+// to know where to dial.
+func LoadSocketPath(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return DefaultControlSocket
+	}
+	var c struct {
+		ControlSocket string `yaml:"control_socket"`
+	}
+	if err := yaml.Unmarshal(data, &c); err != nil || c.ControlSocket == "" {
+		return DefaultControlSocket
+	}
+	return c.ControlSocket
+}
 
 // Load reads, parses, and validates a YAML config from path.
 func Load(path string, logger *slog.Logger) (*Config, error) {

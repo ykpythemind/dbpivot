@@ -31,26 +31,25 @@ type SwitchResult struct {
 // Server hosts the single TCP listener and the per-database routing state.
 // All databases share a single global target name and variable set.
 type Server struct {
-	addr    string
-	cfgPath string
-	logger  *slog.Logger
+	addr   string
+	logger *slog.Logger
 
 	listener net.Listener
 
-	mu             sync.RWMutex
-	databases      map[string]*Database
-	cfg            *config.Config
-	currentTarget  string
-	currentVars    map[string]string
-	closed         bool
-	wg             sync.WaitGroup
+	mu            sync.RWMutex
+	databases     map[string]*Database
+	cfg           *config.Config
+	currentTarget string
+	currentVars   map[string]string
+	closed        bool
+	wg            sync.WaitGroup
 }
 
 // New constructs a Server and activates every database with the given target
 // and variables. Fails atomically: if any database cannot resolve the target
 // (unknown name, missing variables, invalid resolved database, etc.) no
 // databases are activated.
-func New(cfg *config.Config, cfgPath, target string, vars map[string]string, logger *slog.Logger) (*Server, error) {
+func New(cfg *config.Config, target string, vars map[string]string, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -60,7 +59,6 @@ func New(cfg *config.Config, cfgPath, target string, vars map[string]string, log
 	}
 	s := &Server{
 		addr:        net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Port)),
-		cfgPath:     cfgPath,
 		databases:   databases,
 		cfg:         cfg,
 		currentVars: cloneVars(vars),
@@ -423,72 +421,6 @@ func SendCancelRequest(w io.Writer, pid, secret uint32) error {
 	binary.BigEndian.PutUint32(buf[12:16], secret)
 	_, err := w.Write(buf[:])
 	return err
-}
-
-// Reload re-reads the config file and replaces the live database set. The
-// current global target+vars are preserved and re-applied to the new set;
-// if any new database fails to resolve, the swap is aborted and the running
-// state is unchanged. Changes to `port` are reported as warnings.
-func (s *Server) Reload() (updated int, dropped int, warnings []string, err error) {
-	if s.cfgPath == "" {
-		return 0, 0, nil, fmt.Errorf("no config path recorded; reload unavailable")
-	}
-	newCfg, err := config.Load(s.cfgPath, s.logger)
-	if err != nil {
-		return 0, 0, nil, err
-	}
-
-	s.mu.Lock()
-	oldCfg := s.cfg
-	oldDatabases := s.databases
-	currentTarget := s.currentTarget
-	currentVars := cloneVars(s.currentVars)
-	s.mu.Unlock()
-
-	if oldCfg != nil && newCfg.Port != oldCfg.Port {
-		warnings = append(warnings, fmt.Sprintf("port change requires restart (running=%d, config=%d)", oldCfg.Port, newCfg.Port))
-	}
-
-	if !newCfg.HasTarget(currentTarget) {
-		return 0, 0, nil, fmt.Errorf("reload: new config does not declare current target %q", currentTarget)
-	}
-
-	// Build new databases and pre-activate them with the preserved target+vars.
-	newDatabases := make(map[string]*Database, len(newCfg.Databases))
-	for _, c := range newCfg.Databases {
-		newDatabases[c.VirtualName] = NewDatabase(c, newCfg.ForwardTargets)
-	}
-	for name, d := range newDatabases {
-		rt, missing, rerr := d.ResolveTarget(currentTarget, currentVars)
-		if rerr != nil {
-			_ = missing
-			return 0, 0, nil, fmt.Errorf("reload: database %q cannot activate target %q: %w", name, currentTarget, rerr)
-		}
-		d.Apply(rt)
-	}
-
-	for name := range oldDatabases {
-		if _, ok := newDatabases[name]; !ok {
-			warnings = append(warnings, fmt.Sprintf("database %q removed; new connections with dbname=%q will be rejected after reload", name, name))
-		}
-	}
-
-	for _, d := range oldDatabases {
-		dropped += d.DropAll()
-	}
-
-	s.mu.Lock()
-	s.databases = newDatabases
-	s.cfg = newCfg
-	s.mu.Unlock()
-	return len(newDatabases), dropped, warnings, nil
-}
-
-// Config returns the currently loaded config (for control plane listings).
-func (s *Server) Config() *config.Config {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.cfg
 }
 
 // SendSSLRequest writes a single SSLRequest preamble.

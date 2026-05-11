@@ -154,7 +154,7 @@ func startDaemon(t *testing.T, cfg *config.Config, initialTarget string, vars ma
 		cfg.Port = freePort(t)
 	}
 
-	srv, err := proxy.New(cfg, "", initialTarget, vars, logger)
+	srv, err := proxy.New(cfg, initialTarget, vars, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -51,7 +51,7 @@ func TestScenario_RouteAndRewriteDatabase(t *testing.T) {
 	}
 
 	resp, err := control.Call(d.Sock, control.Request{
-		Cmd: control.CmdSwitch, Target: "staging",
+		Cmd: control.CmdUse, Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -112,7 +112,7 @@ func TestScenario_SwitchDropsExistingConn(t *testing.T) {
 	}
 
 	resp, err := control.Call(d.Sock, control.Request{
-		Cmd: control.CmdSwitch, Target: "staging",
+		Cmd: control.CmdUse, Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -172,9 +172,8 @@ func TestScenario_UnknownDatabaseErrorResponse(t *testing.T) {
 	}
 }
 
-// TestScenario_StatusAndList smoke-checks the control plane responses for
-// `status` and `list`.
-func TestScenario_StatusAndList(t *testing.T) {
+// TestScenario_Status smoke-checks the control plane `status` response.
+func TestScenario_Status(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -198,19 +197,8 @@ func TestScenario_StatusAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !st.OK || len(st.Databases) != 1 || st.Databases[0].Current != "local" {
+	if !st.OK || st.CurrentTarget != "local" || len(st.Databases) != 1 || st.Databases[0].Current != "local" {
 		t.Fatalf("status = %+v", st)
-	}
-
-	lst, err := control.Call(d.Sock, control.Request{Cmd: control.CmdList})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !lst.OK || len(lst.ListDatabases) != 1 {
-		t.Fatalf("list = %+v", lst)
-	}
-	if got := lst.ListDatabases[0].Targets[1].RequiredVariables; len(got) != 1 || got[0] != "BRANCH" {
-		t.Errorf("required_variables = %v", got)
 	}
 }
 
@@ -259,7 +247,7 @@ CREATE TABLE items (
 
 	// 2. Switch to staging.
 	resp, err := control.Call(d.Sock, control.Request{
-		Cmd: control.CmdSwitch, Target: "staging",
+		Cmd: control.CmdUse, Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -277,7 +265,7 @@ CREATE TABLE items (
 	}
 
 	// 4. Switch back, confirm we see the dev dataset again.
-	if _, err := control.Call(d.Sock, control.Request{Cmd: control.CmdSwitch, Target: "local"}); err != nil {
+	if _, err := control.Call(d.Sock, control.Request{Cmd: control.CmdUse, Target: "local"}); err != nil {
 		t.Fatal(err)
 	}
 	if rows := selectItems(t, ctx, d.Addr, "appdb"); !equalRows(rows, []itemRow{

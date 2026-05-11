@@ -6,15 +6,15 @@
 
 ```
 local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時 --target local)
-                                                    →  ssm forward → remote DB (switch staging で全 DB 同時切替)
+                                                    →  ssm forward → remote DB (use staging で全 DB 同時切替)
 ```
 
 ## 何ができる
 
 - **1 ポートで複数 database を多重化**: アプリは `dbname=<virtual_name>` で接続するだけ。proxy が StartupMessage を読んで database ごとの上流に振り分ける。
 - **`database` の動的書き換え**: アプリは常に同じ dbname で繋ぐが、現在の target に設定された実 DB 名で StartupMessage を書き換えて upstream へ送る。
-- **target は環境**: `local` / `staging` / `prod` のように **全 database で共通の target 名集合** を持つ。`switch <target>` は全 database を同時に切り替える (二相 commit、どれか失敗したら全部やらない)。
-- **テンプレート変数**: `app_${BRANCH}_staging` のように書いておき、`switch` や `serve` 時に `--var BRANCH=main` で展開。
+- **target は環境**: `local` / `staging` / `prod` のように **全 database で共通の target 名集合** を持つ。`dbpivot use <target>` は全 database を同時に切り替える (二相 commit、どれか失敗したら全部やらない)。
+- **テンプレート変数**: `app_${BRANCH}_staging` のように書いておき、`use` や `serve` 時に `--var BRANCH=main` で展開。
 - **既存接続の即時切断**: 切替時に該当 database の全接続を force-close。クライアントは再接続するだけで新ターゲットへ。
 - **SCRAM-SHA-256 代理認証**: client → proxy は trust auth、proxy → upstream は SCRAM-SHA-256 で本物の認証。target ごとに user/password を持つ。
 - **ssm port-forward と相性◎**: `aws ssm start-session --document-name AWS-StartPortForwardingSessionToRemoteHost` 等でローカルに立てた forward 先を `forward_targets` として参照するだけ。ssm 自体は管理しない。
@@ -32,7 +32,9 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時
 
 MySQL / MongoDB、TLS、CancelRequest ルーティング、MD5/cleartext upstream auth は v1 のスコープ外。
 
-## 設定例
+## 設定ファイル
+
+カレントディレクトリの `.dbpivot.yml` を既定で読む (任意のパスにしたい場合は `--config PATH`)。
 
 ```yaml
 port: 6432                                   # アプリが接続する単一の listen port (127.0.0.1)
@@ -59,7 +61,7 @@ databases:
         forward_to: ssm-staging
         user: app_staging_user
         password: stg_password
-        database: app_${BRANCH}_staging      # switch 時に --var BRANCH=... 必須
+        database: app_${BRANCH}_staging      # use 時に --var BRANCH=... 必須
       - name: prod
         forward_to: ssm-prod
         user: app_prod_user
@@ -103,14 +105,17 @@ go build -o dbpivot ./cmd/dbpivot
 
 ### 起動
 
-起動時に `--target` で全 database に適用する target を指定する。テンプレート変数が必要なら `--var KEY=VAL` も併用。
+`--target` で全 database に適用する初期 target を指定。テンプレート変数が必要なら `--var KEY=VAL` も併用。
 
 ```bash
-# シンプル: ローカル DB に向ける
-dbpivot serve --config ./config.yaml --target local
+# シンプル: ローカル DB に向ける (./.dbpivot.yml を読む)
+dbpivot serve --target local
 
 # 起動時から staging に繋ぎたい (BRANCH 必須)
-dbpivot serve --config ./config.yaml --target staging --var BRANCH=main
+dbpivot serve --target staging --var BRANCH=main
+
+# 別パスの config を使う
+dbpivot serve --config ~/my-dbpivot.yml --target local
 ```
 
 ### 接続
@@ -126,12 +131,12 @@ psql 'host=127.0.0.1 port=6432 user=anyuser dbname=appdb password=anything sslmo
 ### CLI
 
 ```
-dbpivot serve   --config PATH --target TARGET [--var KEY=VAL]... [--socket PATH] [--log-level info|debug]
-dbpivot switch  <target> [--var KEY=VAL]... [--socket PATH] [--json]
-dbpivot status  [<virtual_name>]            [--socket PATH] [--json]
-dbpivot list                                [--socket PATH] [--json]
-dbpivot reload                              [--socket PATH] [--json]
+dbpivot serve  --target TARGET [--var KEY=VAL]... [--config PATH] [--log-level LVL]
+dbpivot use    <target> [--var KEY=VAL]... [--config PATH] [--json]
+dbpivot status [--config PATH] [--json]
 ```
+
+`--config` は省略時 `./.dbpivot.yml`。`use` / `status` は config の `control_socket` を読んで daemon に接続する (config が無ければ `/tmp/dbpivot.sock`)。
 
 例:
 
@@ -143,16 +148,13 @@ dbpivot status
 #   analytics -> local (db=analytics_dev upstream=127.0.0.1:5432 active=0)
 
 # 全 database を staging に同時切替
-dbpivot switch staging --var BRANCH=main
+dbpivot use staging --var BRANCH=main
 # switched to target "staging":
 #   appdb:     local (db=app_dev) -> staging (db=app_main_staging) (closed 0 connection(s))
 #   analytics: local (db=analytics_dev) -> staging (db=analytics_staging) (closed 0 connection(s))
 
 # 戻す
-dbpivot switch local
-
-# 設定を再読込 (port 変更は再起動必須。現在の target+vars は保持)
-dbpivot reload
+dbpivot use local
 ```
 
 ## アーキテクチャ
@@ -197,10 +199,10 @@ go test -tags=scenario ./scenario/...
 `scenario/` 配下は `//go:build scenario` で守られているので通常実行では走らない。`testcontainers-go` で Postgres 16 を立て、SCRAM 認証込みで:
 
 - dbname → database ルーティングと `database` 書き換え
-- switch による既存接続の force-close
+- use による既存接続の force-close
 - 同一スキーマ + 別データの切替検証
 - 未知 database での PG ErrorResponse
-- control plane (`status` / `list` / `switch`)
+- control plane (`status` / `use`)
 
 を verify する。
 

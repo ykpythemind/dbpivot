@@ -20,12 +20,11 @@ import (
 )
 
 var (
-	flagSocket    string
-	flagJSON      bool
-	flagConfig    string
-	flagLogLevel  string
-	flagVars      []string
-	flagServeTgt  string
+	flagJSON     bool
+	flagConfig   string
+	flagLogLevel string
+	flagVars     []string
+	flagServeTgt string
 )
 
 func main() {
@@ -35,13 +34,11 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.PersistentFlags().StringVar(&flagSocket, "socket", config.DefaultControlSocket, "control socket path")
+	root.PersistentFlags().StringVar(&flagConfig, "config", config.DefaultConfigPath, "path to config YAML")
 
 	root.AddCommand(serveCmd())
-	root.AddCommand(switchCmd())
+	root.AddCommand(useCmd())
 	root.AddCommand(statusCmd())
-	root.AddCommand(listCmd())
-	root.AddCommand(reloadCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -57,11 +54,9 @@ func serveCmd() *cobra.Command {
 			return runServe()
 		},
 	}
-	c.Flags().StringVar(&flagConfig, "config", "", "path to config YAML (required)")
 	c.Flags().StringVar(&flagLogLevel, "log-level", "info", "log level (debug|info|warn|error)")
 	c.Flags().StringVar(&flagServeTgt, "target", "", "initial target to activate all databases with (required)")
 	c.Flags().StringSliceVar(&flagVars, "var", nil, "variable in KEY=VAL form (may be repeated or comma-separated)")
-	_ = c.MarkFlagRequired("config")
 	_ = c.MarkFlagRequired("target")
 	return c
 }
@@ -73,9 +68,9 @@ func runServe() error {
 		return err
 	}
 
-	socketPath := flagSocket
-	if cfg.ControlSocket != "" && socketPath == config.DefaultControlSocket {
-		socketPath = cfg.ControlSocket
+	socketPath := cfg.ControlSocket
+	if socketPath == "" {
+		socketPath = config.DefaultControlSocket
 	}
 
 	if resp, perr := control.TryProbe(socketPath); perr == nil && resp.OK {
@@ -92,7 +87,7 @@ func runServe() error {
 	if err != nil {
 		return err
 	}
-	d, err := proxy.New(cfg, flagConfig, flagServeTgt, vars, logger)
+	d, err := proxy.New(cfg, flagServeTgt, vars, logger)
 	if err != nil {
 		return err
 	}
@@ -121,9 +116,9 @@ func runServe() error {
 	return nil
 }
 
-func switchCmd() *cobra.Command {
+func useCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "switch <target>",
+		Use:   "use <target>",
 		Short: "Switch every database to <target>",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -131,13 +126,13 @@ func switchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := control.Call(flagSocket, control.Request{
-				Cmd: control.CmdSwitch, Target: args[0], Variables: vars,
+			resp, err := control.Call(config.LoadSocketPath(flagConfig), control.Request{
+				Cmd: control.CmdUse, Target: args[0], Variables: vars,
 			})
 			if err != nil {
 				return err
 			}
-			return renderSwitch(resp)
+			return renderUse(resp)
 		},
 	}
 	c.Flags().StringSliceVar(&flagVars, "var", nil, "variable in KEY=VAL form (may be repeated or comma-separated)")
@@ -147,51 +142,15 @@ func switchCmd() *cobra.Command {
 
 func statusCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "status [virtual_name]",
+		Use:   "status",
 		Short: "Show the active target and per-database state",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			req := control.Request{Cmd: control.CmdStatus}
-			if len(args) == 1 {
-				req.VirtualName = args[0]
-			}
-			resp, err := control.Call(flagSocket, req)
+			resp, err := control.Call(config.LoadSocketPath(flagConfig), control.Request{Cmd: control.CmdStatus})
 			if err != nil {
 				return err
 			}
 			return renderStatus(resp)
-		},
-	}
-	c.Flags().BoolVar(&flagJSON, "json", false, "emit raw JSON response")
-	return c
-}
-
-func listCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "list",
-		Short: "List databases and their configured targets",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := control.Call(flagSocket, control.Request{Cmd: control.CmdList})
-			if err != nil {
-				return err
-			}
-			return renderList(resp)
-		},
-	}
-	c.Flags().BoolVar(&flagJSON, "json", false, "emit raw JSON response")
-	return c
-}
-
-func reloadCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "reload",
-		Short: "Re-read the config file",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := control.Call(flagSocket, control.Request{Cmd: control.CmdReload})
-			if err != nil {
-				return err
-			}
-			return renderReload(resp)
 		},
 	}
 	c.Flags().BoolVar(&flagJSON, "json", false, "emit raw JSON response")
@@ -219,7 +178,7 @@ func parseVars(in []string) (map[string]string, error) {
 	return out, nil
 }
 
-func renderSwitch(resp *control.Response) error {
+func renderUse(resp *control.Response) error {
 	if flagJSON {
 		emitJSON(resp)
 		return exitErrIfNotOK(resp)
@@ -257,60 +216,6 @@ func renderStatus(resp *control.Response) error {
 	for _, d := range resp.Databases {
 		fmt.Printf("  %s -> %s (db=%s upstream=%s:%d active=%d)\n",
 			d.VirtualName, d.Current, d.CurrentDatabase, d.CurrentHost, d.CurrentPort, d.ActiveConns)
-	}
-	return nil
-}
-
-func renderList(resp *control.Response) error {
-	if flagJSON {
-		emitJSON(resp)
-		return exitErrIfNotOK(resp)
-	}
-	if !resp.OK {
-		fmt.Fprintln(os.Stderr, "error:", resp.Error)
-		os.Exit(1)
-	}
-	fmt.Printf("port: %d\n", resp.Port)
-	if len(resp.TargetNames) > 0 {
-		fmt.Printf("targets: %s\n", strings.Join(resp.TargetNames, ", "))
-	}
-	if len(resp.ForwardTargets) > 0 {
-		fmt.Println("forward_targets:")
-		for name, ft := range resp.ForwardTargets {
-			fmt.Printf("  %s -> %s:%d\n", name, ft.Host, ft.Port)
-		}
-	}
-	for _, dl := range resp.ListDatabases {
-		fmt.Printf("database %s:\n", dl.VirtualName)
-		for _, t := range dl.Targets {
-			endpoint := ""
-			if t.ForwardTo != "" {
-				endpoint = "forward_to=" + t.ForwardTo
-			} else {
-				endpoint = fmt.Sprintf("%s:%d", t.Host, t.Port)
-			}
-			vars := ""
-			if len(t.RequiredVariables) > 0 {
-				vars = " vars=" + strings.Join(t.RequiredVariables, ",")
-			}
-			fmt.Printf("  %-12s %s user=%s db=%q%s\n", t.Name, endpoint, t.User, t.DatabaseTemplate, vars)
-		}
-	}
-	return nil
-}
-
-func renderReload(resp *control.Response) error {
-	if flagJSON {
-		emitJSON(resp)
-		return exitErrIfNotOK(resp)
-	}
-	if !resp.OK {
-		fmt.Fprintln(os.Stderr, "error:", resp.Error)
-		os.Exit(1)
-	}
-	fmt.Printf("reloaded: %d database(s) updated, %d connection(s) dropped\n", resp.DatabasesUpdated, resp.DroppedConns)
-	for _, w := range resp.Warnings {
-		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
 	return nil
 }

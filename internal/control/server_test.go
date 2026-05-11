@@ -37,7 +37,7 @@ func setup(t *testing.T) (sockPath string, srv *Server, dm *proxy.Server) {
 			},
 		},
 	}
-	d, err := proxy.New(cfg, "", "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d, err := proxy.New(cfg, "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,18 +71,10 @@ func TestControl_Status(t *testing.T) {
 	}
 }
 
-func TestControl_Status_UnknownDatabase(t *testing.T) {
-	sock, _, _ := setup(t)
-	resp, _ := Call(sock, Request{Cmd: CmdStatus, VirtualName: "missing"})
-	if resp.OK {
-		t.Fatal("expected error")
-	}
-}
-
-func TestControl_SwitchOK(t *testing.T) {
+func TestControl_UseOK(t *testing.T) {
 	sock, _, _ := setup(t)
 	resp, err := Call(sock, Request{
-		Cmd: CmdSwitch, Target: "staging",
+		Cmd: CmdUse, Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -103,9 +95,9 @@ func TestControl_SwitchOK(t *testing.T) {
 	}
 }
 
-func TestControl_SwitchMissingVariables(t *testing.T) {
+func TestControl_UseMissingVariables(t *testing.T) {
 	sock, _, _ := setup(t)
-	resp, err := Call(sock, Request{Cmd: CmdSwitch, Target: "staging"})
+	resp, err := Call(sock, Request{Cmd: CmdUse, Target: "staging"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,35 +109,11 @@ func TestControl_SwitchMissingVariables(t *testing.T) {
 	}
 }
 
-func TestControl_SwitchUnknownTarget(t *testing.T) {
+func TestControl_UseUnknownTarget(t *testing.T) {
 	sock, _, _ := setup(t)
-	resp, _ := Call(sock, Request{Cmd: CmdSwitch, Target: "nope"})
+	resp, _ := Call(sock, Request{Cmd: CmdUse, Target: "nope"})
 	if resp.OK {
 		t.Fatal("expected error")
-	}
-}
-
-func TestControl_List(t *testing.T) {
-	sock, _, _ := setup(t)
-	resp, err := Call(sock, Request{Cmd: CmdList})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.OK || len(resp.ListDatabases) != 1 {
-		t.Fatalf("%+v", resp)
-	}
-	if len(resp.TargetNames) != 2 || resp.TargetNames[0] != "local" || resp.TargetNames[1] != "staging" {
-		t.Errorf("target_names = %v", resp.TargetNames)
-	}
-	dl := resp.ListDatabases[0]
-	if dl.VirtualName != "appdb" {
-		t.Errorf("%+v", dl)
-	}
-	if len(dl.Targets) != 2 {
-		t.Fatalf("targets = %v", dl.Targets)
-	}
-	if got := dl.Targets[1].RequiredVariables; len(got) != 1 || got[0] != "BRANCH" {
-		t.Errorf("required = %v", got)
 	}
 }
 
