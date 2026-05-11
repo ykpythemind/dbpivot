@@ -11,8 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/ykpythemind/db-pool-switch/internal/config"
-	"github.com/ykpythemind/db-pool-switch/internal/control"
+	"github.com/ykpythemind/dbpivot/internal/config"
+	"github.com/ykpythemind/dbpivot/internal/control"
 )
 
 // TestScenario_RouteAndRewriteDatabase brings up a real Postgres, creates

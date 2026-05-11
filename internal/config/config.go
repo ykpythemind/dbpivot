@@ -52,7 +52,7 @@ type Config struct {
 	Pools          []Pool                   `yaml:"pools"`
 }
 
-const DefaultControlSocket = "/tmp/db-pool-switch.sock"
+const DefaultControlSocket = "/tmp/dbpivot.sock"
 
 // Load reads, parses, and validates a YAML config from path.
 func Load(path string, logger *slog.Logger) (*Config, error) {

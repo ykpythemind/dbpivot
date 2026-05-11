@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ykpythemind/db-pool-switch/internal/config"
+	"github.com/ykpythemind/dbpivot/internal/config"
 )
 
 const dialTimeout = 5 * time.Second

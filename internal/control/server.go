@@ -10,8 +10,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ykpythemind/db-pool-switch/internal/config"
-	"github.com/ykpythemind/db-pool-switch/internal/proxy"
+	"github.com/ykpythemind/dbpivot/internal/config"
+	"github.com/ykpythemind/dbpivot/internal/proxy"
 )
 
 // Daemon is the interface the control server expects from the running

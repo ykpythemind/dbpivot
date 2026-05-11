@@ -1,11 +1,11 @@
-# db-pool-switch
+# dbpivot
 
 ローカル開発時に「同じアプリから接続する DB を、ローカル ⇄ リモートで瞬時に切り替えたい」需要に応えるための、PostgreSQL 専用のローカルプロキシ。
 
 アプリの接続文字列を書き換えずに、CLI 一発で接続先を切り替えられる。
 
 ```
-local app  → (port 6432, dbname=appdb)  →  db-pool-switch  →  local DB (default)
+local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (default)
                                                           →  ssm forward → remote DB
 ```
 
@@ -35,7 +35,7 @@ MySQL / MongoDB、TLS、CancelRequest ルーティング、MD5/cleartext upstrea
 
 ```yaml
 port: 6432                                   # アプリが接続する単一の listen port (127.0.0.1)
-control_socket: /tmp/db-pool-switch.sock     # 省略可
+control_socket: /tmp/dbpivot.sock     # 省略可
 
 forward_targets:                             # 省略可。inline 派なら不要
   ssm-staging:
@@ -89,13 +89,13 @@ pools:
 ### ビルド
 
 ```bash
-go build -o db-pool-switch ./cmd/db-pool-switch
+go build -o dbpivot ./cmd/dbpivot
 ```
 
 ### 起動
 
 ```bash
-db-pool-switch serve --config ./config.yaml
+dbpivot serve --config ./config.yaml
 ```
 
 ### 接続
@@ -111,35 +111,35 @@ psql 'host=127.0.0.1 port=6432 user=anyuser dbname=appdb password=anything sslmo
 ### CLI
 
 ```
-db-pool-switch serve   --config PATH [--socket PATH] [--log-level info|debug]
-db-pool-switch switch  <pool> <target> [--var KEY=VAL]... [--socket PATH] [--json]
-db-pool-switch status  [<pool>]                            [--socket PATH] [--json]
-db-pool-switch list                                        [--socket PATH] [--json]
-db-pool-switch reload                                      [--socket PATH] [--json]
+dbpivot serve   --config PATH [--socket PATH] [--log-level info|debug]
+dbpivot switch  <pool> <target> [--var KEY=VAL]... [--socket PATH] [--json]
+dbpivot status  [<pool>]                            [--socket PATH] [--json]
+dbpivot list                                        [--socket PATH] [--json]
+dbpivot reload                                      [--socket PATH] [--json]
 ```
 
 例:
 
 ```bash
 # 確認
-db-pool-switch status
+dbpivot status
 # appdb -> local (db=app_dev upstream=127.0.0.1:5432 active=0)
 
 # 切替 (variables 必須の target)
-db-pool-switch switch appdb staging --var BRANCH=main
+dbpivot switch appdb staging --var BRANCH=main
 # appdb: local (db=app_dev) -> staging (db=app_main_staging) (closed 0 connection(s))
 
 # 戻す
-db-pool-switch switch appdb local
+dbpivot switch appdb local
 
 # 設定を再読込 (port 変更は再起動必須)
-db-pool-switch reload
+dbpivot reload
 ```
 
 ## アーキテクチャ
 
 ```
-cmd/db-pool-switch/main.go        // cobra CLI
+cmd/dbpivot/main.go        // cobra CLI
 internal/
   config/    config.go             // YAML ロード + バリデーション
              variables.go          // ${VAR} 展開
@@ -187,4 +187,4 @@ go test -tags=scenario ./scenario/...
 
 ## 設計の詳細
 
-実装プランは [docs/plans/2026-05-12-db-pool-switch-implementation.md](docs/plans/2026-05-12-db-pool-switch-implementation.md) に。
+実装プランは [docs/plans/2026-05-12-dbpivot-implementation.md](docs/plans/2026-05-12-dbpivot-implementation.md) に。

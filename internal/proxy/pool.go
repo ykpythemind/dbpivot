@@ -6,7 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/ykpythemind/db-pool-switch/internal/config"
+	"github.com/ykpythemind/dbpivot/internal/config"
 )
 
 // ResolvedTarget is a snapshot of a target with all variables and forward

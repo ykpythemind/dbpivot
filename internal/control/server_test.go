@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ykpythemind/db-pool-switch/internal/config"
-	"github.com/ykpythemind/db-pool-switch/internal/proxy"
+	"github.com/ykpythemind/dbpivot/internal/config"
+	"github.com/ykpythemind/dbpivot/internal/proxy"
 )
 
 // shortSocketPath returns a path under /tmp short enough to satisfy macOS's

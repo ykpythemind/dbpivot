@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ykpythemind/db-pool-switch/internal/config"
+	"github.com/ykpythemind/dbpivot/internal/config"
 )
 
 // fakeUpstream listens on 127.0.0.1:0 and, for each accepted connection,

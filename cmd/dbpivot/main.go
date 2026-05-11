@@ -14,9 +14,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ykpythemind/db-pool-switch/internal/config"
-	"github.com/ykpythemind/db-pool-switch/internal/control"
-	"github.com/ykpythemind/db-pool-switch/internal/proxy"
+	"github.com/ykpythemind/dbpivot/internal/config"
+	"github.com/ykpythemind/dbpivot/internal/control"
+	"github.com/ykpythemind/dbpivot/internal/proxy"
 )
 
 var (
@@ -29,7 +29,7 @@ var (
 
 func main() {
 	root := &cobra.Command{
-		Use:           "db-pool-switch",
+		Use:           "dbpivot",
 		Short:         "A switchable local DB proxy",
 		SilenceUsage:  true,
 		SilenceErrors: true,

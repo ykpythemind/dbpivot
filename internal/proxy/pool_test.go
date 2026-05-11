@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ykpythemind/db-pool-switch/internal/config"
+	"github.com/ykpythemind/dbpivot/internal/config"
 )
 
 func buildPool(t *testing.T) *Pool {

@@ -1,4 +1,4 @@
-module github.com/ykpythemind/db-pool-switch
+module github.com/ykpythemind/dbpivot
 
 go 1.25.0
 

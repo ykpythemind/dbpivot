@@ -1,13 +1,13 @@
-# db-pool-switch 実装プラン
+# dbpivot 実装プラン
 
 ## Context
 
-ローカル開発時に「同じアプリから接続する DB を、ローカル⇄リモートで瞬時に切り替えたい」需要に応える道具。アプリの接続文字列を書き換える運用は摩擦が大きく、再起動も発生する。アプリは常にプロキシ (`db-pool-switch`) に繋ぎ、CLI から上流ターゲットを切り替えることで、アプリ側の設定を一切触らずに接続先を変えられる状態を目指す。
+ローカル開発時に「同じアプリから接続する DB を、ローカル⇄リモートで瞬時に切り替えたい」需要に応える道具。アプリの接続文字列を書き換える運用は摩擦が大きく、再起動も発生する。アプリは常にプロキシ (`dbpivot`) に繋ぎ、CLI から上流ターゲットを切り替えることで、アプリ側の設定を一切触らずに接続先を変えられる状態を目指す。
 
-リモートDBへの接続は、ユーザーが事前に `aws ssm start-session --document-name AWS-StartPortForwardingSessionToRemoteHost` などで `127.0.0.1:15432` のようなローカル forward 先を立てておく前提。db-pool-switch はそれを `forward_target` として参照するだけで、ssm セッション自体は管理しない。
+リモートDBへの接続は、ユーザーが事前に `aws ssm start-session --document-name AWS-StartPortForwardingSessionToRemoteHost` などで `127.0.0.1:15432` のようなローカル forward 先を立てておく前提。dbpivot はそれを `forward_target` として参照するだけで、ssm セッション自体は管理しない。
 
 ```
-local app  → (port 6432, dbname=appdb)  →  db-pool-switch  →  local DB (default)
+local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (default)
                                                           →  ssm forward → remote DB
 ```
 
@@ -42,9 +42,9 @@ local app  → (port 6432, dbname=appdb)  →  db-pool-switch  →  local DB (de
 ## ファイル/パッケージ構成
 
 ```
-db-pool-switch/
+dbpivot/
   go.mod
-  cmd/db-pool-switch/main.go          // cobra root + サブコマンド
+  cmd/dbpivot/main.go          // cobra root + サブコマンド
   internal/
     config/config.go                  // Load, Validate, ForwardTarget, Pool, Target
     config/variables.go               // RequiredVars / Resolve
@@ -65,7 +65,7 @@ db-pool-switch/
 
 ```yaml
 port: 6432                                   # アプリが接続する単一の listen port (127.0.0.1)
-control_socket: /tmp/db-pool-switch.sock     # 省略可、デフォルト同値
+control_socket: /tmp/dbpivot.sock     # 省略可、デフォルト同値
 
 forward_targets:                             # 省略可 (リモート系の共有用)
   ssm-staging:
@@ -521,15 +521,15 @@ socket は `0600`、1接続1コマンド (応答後にサーバ側からclose)�
 ## CLI
 
 ```
-db-pool-switch serve   --config PATH [--socket PATH] [--log-level info|debug]
-db-pool-switch switch  <pool> <target> [--var KEY=VAL]... [--socket PATH] [--json]
-db-pool-switch status  [<pool>]                            [--socket PATH] [--json]
-db-pool-switch list                                        [--socket PATH] [--json]
-db-pool-switch reload                                      [--socket PATH] [--json]
+dbpivot serve   --config PATH [--socket PATH] [--log-level info|debug]
+dbpivot switch  <pool> <target> [--var KEY=VAL]... [--socket PATH] [--json]
+dbpivot status  [<pool>]                            [--socket PATH] [--json]
+dbpivot list                                        [--socket PATH] [--json]
+dbpivot reload                                      [--socket PATH] [--json]
 ```
 
 - `--config` は `serve` 専用、かつ必須。
-- `--socket` デフォルトは `/tmp/db-pool-switch.sock`。
+- `--socket` デフォルトは `/tmp/dbpivot.sock`。
 - `--var` は `KEY=VAL` を複数回 or `KEY1=VAL1,KEY2=VAL2` 形式 (cobra `StringSlice`)。control プロトコル上の JSON キーは `variables`。
 - `--json` で生 JSON 応答をそのまま stdout。未指定なら人間向け整形 (例: `appdb: local (db=app_dev) -> staging (db=app_main_staging) (closed 3 connection(s))`)。
 - exit code: `0` 成功 / `1` daemon応答 `ok:false` / `2` クライアント側エラー (socket dial 失敗、引数不正)。
@@ -596,17 +596,17 @@ pools:
 ```
 
 手順:
-1. `db-pool-switch serve --config ./config.yaml` → `listening 127.0.0.1:6432`、`pool appdb current=local (db=app_dev)`
+1. `dbpivot serve --config ./config.yaml` → `listening 127.0.0.1:6432`、`pool appdb current=local (db=app_dev)`
 2. `psql 'host=127.0.0.1 port=6432 user=anyuser dbname=appdb password=anything sslmode=disable' -At -c 'select current_database()'` → `app_dev` (client password は何でもよい = trust)
 3. `sslmode=prefer` でも同様 (SSLRequest → 'N' 経路)
 4. `psql ... dbname=nonexistent_pool ...` → `psql: error: ... FATAL: pool "nonexistent_pool" not configured`
-5. `db-pool-switch status` → `current=local, current_database=app_dev`
-6. `db-pool-switch switch appdb staging` → ERROR `missing variables: BRANCH`
-7. `db-pool-switch switch appdb staging --var BRANCH=main` → `appdb: local (db=app_dev) -> staging (db=app_main_staging)`
+5. `dbpivot status` → `current=local, current_database=app_dev`
+6. `dbpivot switch appdb staging` → ERROR `missing variables: BRANCH`
+7. `dbpivot switch appdb staging --var BRANCH=main` → `appdb: local (db=app_dev) -> staging (db=app_main_staging)`
 8. 別タブの psql が切断、再接続で `select current_database()` が `app_main_staging`、`SELECT current_user;` が `postgres` (target.user)
-9. `db-pool-switch switch appdb staging --var BRANCH=feat-x` → 再切替 (DB が無ければ PG が `database does not exist` を返す。期待挙動)
-10. `db-pool-switch switch appdb local` → `app_dev` に戻る (variables 不要)
-11. `db-pool-switch reload` → 対象 pool 全切断、再接続で新設定
+9. `dbpivot switch appdb staging --var BRANCH=feat-x` → 再切替 (DB が無ければ PG が `database does not exist` を返す。期待挙動)
+10. `dbpivot switch appdb local` → `app_dev` に戻る (variables 不要)
+11. `dbpivot reload` → 対象 pool 全切断、再接続で新設定
 12. `SIGINT` でクリーン終了、socket ファイル消える
 
 ### 単体テスト
@@ -654,15 +654,15 @@ pools:
 
 ## 実装対象ファイル
 
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/go.mod`
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/cmd/db-pool-switch/main.go`
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/internal/config/config.go`
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/internal/config/variables.go`
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/internal/proxy/server.go`
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/internal/proxy/pool.go`
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/internal/proxy/pgwire.go`
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/internal/proxy/auth.go`
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/internal/control/protocol.go`
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/internal/control/server.go`
-- `/Users/ykpythemind/git/github.com/ykpythemind/db-pool-switch/internal/control/client.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/go.mod`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/cmd/dbpivot/main.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/config/config.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/config/variables.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/proxy/server.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/proxy/pool.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/proxy/pgwire.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/proxy/auth.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/control/protocol.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/control/server.go`
+- `/Users/ykpythemind/git/github.com/ykpythemind/dbpivot/internal/control/client.go`
 - 各 `*_test.go`

@@ -19,9 +19,9 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcpg "github.com/testcontainers/testcontainers-go/modules/postgres"
 
-	"github.com/ykpythemind/db-pool-switch/internal/config"
-	"github.com/ykpythemind/db-pool-switch/internal/control"
-	"github.com/ykpythemind/db-pool-switch/internal/proxy"
+	"github.com/ykpythemind/dbpivot/internal/config"
+	"github.com/ykpythemind/dbpivot/internal/control"
+	"github.com/ykpythemind/dbpivot/internal/proxy"
 )
 
 // pgContainer wraps a postgres testcontainer along with a directly usable
