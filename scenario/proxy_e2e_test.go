@@ -218,6 +218,125 @@ func TestScenario_StatusAndList(t *testing.T) {
 	}
 }
 
+// TestScenario_SwitchSwapsDataset puts the same schema into two databases
+// with different rows, then verifies that a switch is visible as the data
+// returned by a SELECT through the proxy.
+func TestScenario_SwitchSwapsDataset(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	pg := startPostgres(t, ctx)
+	pg.createDatabase(t, ctx, "app_dev")
+	pg.createDatabase(t, ctx, "app_main_staging")
+
+	// Same schema, different rows.
+	const schema = `
+CREATE TABLE items (
+    id   int PRIMARY KEY,
+    name text NOT NULL
+);`
+	pg.exec(t, ctx, "app_dev", schema)
+	pg.exec(t, ctx, "app_main_staging", schema)
+
+	pg.exec(t, ctx, "app_dev", `INSERT INTO items VALUES (1, 'dev-alpha'), (2, 'dev-beta')`)
+	pg.exec(t, ctx, "app_main_staging", `INSERT INTO items VALUES (10, 'staging-gamma'), (20, 'staging-delta'), (30, 'staging-epsilon')`)
+
+	cfg := &config.Config{
+		Pools: []config.Pool{
+			{
+				Name:    "appdb",
+				Default: "local",
+				Targets: []config.Target{
+					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
+					{Name: "staging", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_${BRANCH}_staging"},
+				},
+			},
+		},
+	}
+	d := startDaemon(t, cfg)
+
+	// 1. Default target → app_dev rows.
+	if rows := selectItems(t, ctx, d.Addr, "appdb"); !equalRows(rows, []itemRow{
+		{1, "dev-alpha"}, {2, "dev-beta"},
+	}) {
+		t.Errorf("default rows = %v, want dev dataset", rows)
+	}
+
+	// 2. Switch to staging.
+	resp, err := control.Call(d.Sock, control.Request{
+		Cmd: control.CmdSwitch, Pool: "appdb", Target: "staging",
+		Variables: map[string]string{"BRANCH": "main"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatalf("switch: %v", resp.Error)
+	}
+
+	// 3. Same dbname=appdb on the client, but now we see the staging dataset.
+	if rows := selectItems(t, ctx, d.Addr, "appdb"); !equalRows(rows, []itemRow{
+		{10, "staging-gamma"}, {20, "staging-delta"}, {30, "staging-epsilon"},
+	}) {
+		t.Errorf("post-switch rows = %v, want staging dataset", rows)
+	}
+
+	// 4. Switch back, confirm we see the dev dataset again.
+	if _, err := control.Call(d.Sock, control.Request{Cmd: control.CmdSwitch, Pool: "appdb", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if rows := selectItems(t, ctx, d.Addr, "appdb"); !equalRows(rows, []itemRow{
+		{1, "dev-alpha"}, {2, "dev-beta"},
+	}) {
+		t.Errorf("post-switch-back rows = %v, want dev dataset", rows)
+	}
+}
+
+type itemRow struct {
+	ID   int
+	Name string
+}
+
+func selectItems(t *testing.T, ctx context.Context, addr, dbname string) []itemRow {
+	t.Helper()
+	dsn := fmt.Sprintf("postgres://anyone:any@%s/%s?sslmode=disable", addr, dbname)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	rows, err := conn.Query(ctx, "SELECT id, name FROM items ORDER BY id")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var out []itemRow
+	for rows.Next() {
+		var r itemRow
+		if err := rows.Scan(&r.ID, &r.Name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows err: %v", err)
+	}
+	return out
+}
+
+func equalRows(a, b []itemRow) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

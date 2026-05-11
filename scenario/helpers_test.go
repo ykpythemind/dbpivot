@@ -97,6 +97,21 @@ func (pc *pgContainer) createDatabase(t *testing.T, ctx context.Context, name st
 	}
 }
 
+// exec opens a fresh pgx connection straight to the upstream Postgres
+// (bypassing the proxy) for the given database and runs sql.
+func (pc *pgContainer) exec(t *testing.T, ctx context.Context, database, sql string) {
+	t.Helper()
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", pc.User, pc.Pass, pc.Host, pc.Port, database)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to %s: %v", database, err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, sql); err != nil {
+		t.Fatalf("exec on %s: %v\nSQL:\n%s", database, err, sql)
+	}
+}
+
 // freePort returns a TCP port that was free at the moment of the call.
 func freePort(t *testing.T) int {
 	t.Helper()
