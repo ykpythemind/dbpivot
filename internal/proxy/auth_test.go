@@ -155,7 +155,10 @@ func runFakeSCRAMServer(conn net.Conn, user, password string) error {
 		return err
 	}
 	kf := scram.KeyFactors{Iters: 4096, Salt: "salty-mc-salt"}
-	stored := cli.GetStoredCredentials(kf)
+	stored, err := cli.GetStoredCredentialsWithError(kf)
+	if err != nil {
+		return err
+	}
 	kfLookup := func(string) (scram.StoredCredentials, error) { return stored, nil }
 	server, err := scram.SHA256.NewServer(kfLookup)
 	if err != nil {
