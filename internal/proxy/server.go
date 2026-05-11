@@ -18,7 +18,18 @@ import (
 
 const dialTimeout = 5 * time.Second
 
+// SwitchResult captures one database's outcome in a SwitchAll call.
+type SwitchResult struct {
+	VirtualName      string
+	Previous         string // empty if first activation
+	PreviousDatabase string
+	Current          string
+	CurrentDatabase  string
+	ClosedConns      int
+}
+
 // Server hosts the single TCP listener and the per-database routing state.
+// All databases share a single global target name and variable set.
 type Server struct {
 	addr    string
 	cfgPath string
@@ -26,34 +37,39 @@ type Server struct {
 
 	listener net.Listener
 
-	mu        sync.RWMutex
-	databases map[string]*Database
-	cfg       *config.Config
-	closed    bool
-	wg        sync.WaitGroup
+	mu             sync.RWMutex
+	databases      map[string]*Database
+	cfg            *config.Config
+	currentTarget  string
+	currentVars    map[string]string
+	closed         bool
+	wg             sync.WaitGroup
 }
 
-// New constructs a Server from validated config. It does not open any
-// listeners yet — call Start.
-func New(cfg *config.Config, cfgPath string, logger *slog.Logger) (*Server, error) {
+// New constructs a Server and activates every database with the given target
+// and variables. Fails atomically: if any database cannot resolve the target
+// (unknown name, missing variables, invalid resolved database, etc.) no
+// databases are activated.
+func New(cfg *config.Config, cfgPath, target string, vars map[string]string, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	databases := make(map[string]*Database, len(cfg.Databases))
 	for _, c := range cfg.Databases {
-		d, err := NewDatabase(c, cfg.ForwardTargets)
-		if err != nil {
-			return nil, err
-		}
-		databases[c.VirtualName] = d
+		databases[c.VirtualName] = NewDatabase(c, cfg.ForwardTargets)
 	}
-	return &Server{
-		addr:      net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Port)),
-		cfgPath:   cfgPath,
-		databases: databases,
-		cfg:       cfg,
-		logger:    logger,
-	}, nil
+	s := &Server{
+		addr:        net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Port)),
+		cfgPath:     cfgPath,
+		databases:   databases,
+		cfg:         cfg,
+		currentVars: cloneVars(vars),
+		logger:      logger,
+	}
+	if _, err := s.SwitchAll(target, vars); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // Databases returns a snapshot of the live databases keyed by name.
@@ -73,6 +89,14 @@ func (s *Server) lookupDatabase(name string) *Database {
 	return s.databases[name]
 }
 
+// CurrentTarget reports the active global target name and the variables it
+// was activated with. The returned variable map is a clone.
+func (s *Server) CurrentTarget() (string, map[string]string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.currentTarget, cloneVars(s.currentVars)
+}
+
 // Addr returns the listen address.
 func (s *Server) Addr() string {
 	s.mu.RLock()
@@ -90,6 +114,65 @@ func (s *Server) IsClosed() bool {
 	return s.closed
 }
 
+// SwitchAll atomically switches every database to the named target. Phase 1
+// resolves all databases (returning early on the first failure so no state
+// is mutated); phase 2 commits the resolved targets and force-closes existing
+// connections. Updates the server-global currentTarget and currentVars.
+func (s *Server) SwitchAll(target string, vars map[string]string) ([]SwitchResult, error) {
+	s.mu.RLock()
+	databases := make(map[string]*Database, len(s.databases))
+	for k, v := range s.databases {
+		databases[k] = v
+	}
+	s.mu.RUnlock()
+
+	// Phase 1: resolve every database. On any failure, return the error
+	// without touching state — callers can retry with corrected inputs.
+	plans := make(map[string]ResolvedTarget, len(databases))
+	for name, d := range databases {
+		rt, missing, err := d.ResolveTarget(target, vars)
+		if err != nil {
+			return nil, &SwitchPlanError{VirtualName: name, Missing: missing, Err: err}
+		}
+		plans[name] = rt
+	}
+
+	// Phase 2: commit.
+	results := make([]SwitchResult, 0, len(databases))
+	for name, d := range databases {
+		rt := plans[name]
+		prev, closed := d.Apply(rt)
+		r := SwitchResult{
+			VirtualName:     name,
+			Current:         rt.Name,
+			CurrentDatabase: rt.Database,
+			ClosedConns:     closed,
+		}
+		if prev != nil {
+			r.Previous = prev.Name
+			r.PreviousDatabase = prev.Database
+		}
+		results = append(results, r)
+	}
+
+	s.mu.Lock()
+	s.currentTarget = target
+	s.currentVars = cloneVars(vars)
+	s.mu.Unlock()
+	return results, nil
+}
+
+// SwitchPlanError carries a per-database resolution failure from SwitchAll.
+type SwitchPlanError struct {
+	VirtualName string
+	Missing     []string
+	Err         error
+}
+
+func (e *SwitchPlanError) Error() string {
+	return fmt.Sprintf("database %q: %v", e.VirtualName, e.Err)
+}
+
 // Start binds the listener and runs the accept loop. It returns once the
 // listener has stopped accepting (typically because of Shutdown).
 func (s *Server) Start() error {
@@ -100,10 +183,11 @@ func (s *Server) Start() error {
 	s.mu.Lock()
 	s.listener = ln
 	s.mu.Unlock()
-	s.logger.Info("listening", "addr", ln.Addr())
+	s.logger.Info("listening", "addr", ln.Addr(), "target", s.currentTarget)
 	for name, d := range s.Databases() {
-		c := d.Current()
-		s.logger.Info("database ready", "virtual_name", name, "current", c.Name, "database", c.Database, "upstream", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)))
+		if c, ok := d.Current(); ok {
+			s.logger.Info("database ready", "virtual_name", name, "target", c.Name, "database", c.Database, "upstream", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)))
+		}
 	}
 
 	for {
@@ -220,7 +304,11 @@ func (s *Server) handleStartup(client net.Conn, br *bufio.Reader, msgLen int) er
 		return nil
 	}
 
-	rt := database.Current()
+	rt, ok := database.Current()
+	if !ok {
+		_ = WriteErrorResponse(client, "FATAL", "57P03", fmt.Sprintf("database %q has no active target", dbname))
+		return nil
+	}
 
 	// Build the upstream StartupMessage: target user, target database (or
 	// pass-through), keep all other client-supplied parameters.
@@ -337,9 +425,10 @@ func SendCancelRequest(w io.Writer, pid, secret uint32) error {
 	return err
 }
 
-// Reload re-reads the config file and swaps in new database state. All active
-// connections in the affected databases are dropped. Changes to `port` are
-// reported as warnings — port hot-swap is not supported.
+// Reload re-reads the config file and replaces the live database set. The
+// current global target+vars are preserved and re-applied to the new set;
+// if any new database fails to resolve, the swap is aborted and the running
+// state is unchanged. Changes to `port` are reported as warnings.
 func (s *Server) Reload() (updated int, dropped int, warnings []string, err error) {
 	if s.cfgPath == "" {
 		return 0, 0, nil, fmt.Errorf("no config path recorded; reload unavailable")
@@ -352,24 +441,35 @@ func (s *Server) Reload() (updated int, dropped int, warnings []string, err erro
 	s.mu.Lock()
 	oldCfg := s.cfg
 	oldDatabases := s.databases
+	currentTarget := s.currentTarget
+	currentVars := cloneVars(s.currentVars)
 	s.mu.Unlock()
 
 	if oldCfg != nil && newCfg.Port != oldCfg.Port {
 		warnings = append(warnings, fmt.Sprintf("port change requires restart (running=%d, config=%d)", oldCfg.Port, newCfg.Port))
 	}
 
+	if !newCfg.HasTarget(currentTarget) {
+		return 0, 0, nil, fmt.Errorf("reload: new config does not declare current target %q", currentTarget)
+	}
+
+	// Build new databases and pre-activate them with the preserved target+vars.
 	newDatabases := make(map[string]*Database, len(newCfg.Databases))
 	for _, c := range newCfg.Databases {
-		d, perr := NewDatabase(c, newCfg.ForwardTargets)
-		if perr != nil {
-			return 0, 0, nil, perr
+		newDatabases[c.VirtualName] = NewDatabase(c, newCfg.ForwardTargets)
+	}
+	for name, d := range newDatabases {
+		rt, missing, rerr := d.ResolveTarget(currentTarget, currentVars)
+		if rerr != nil {
+			_ = missing
+			return 0, 0, nil, fmt.Errorf("reload: database %q cannot activate target %q: %w", name, currentTarget, rerr)
 		}
-		newDatabases[c.VirtualName] = d
+		d.Apply(rt)
 	}
 
 	for name := range oldDatabases {
 		if _, ok := newDatabases[name]; !ok {
-			warnings = append(warnings, fmt.Sprintf("database %q removed (restart not required for routing changes, but new dbname=%q will be rejected after reload)", name, name))
+			warnings = append(warnings, fmt.Sprintf("database %q removed; new connections with dbname=%q will be rejected after reload", name, name))
 		}
 	}
 
@@ -398,4 +498,15 @@ func SendSSLRequest(w io.Writer) error {
 	binary.BigEndian.PutUint32(buf[4:8], SSLRequestCode)
 	_, err := w.Write(buf[:])
 	return err
+}
+
+func cloneVars(v map[string]string) map[string]string {
+	if v == nil {
+		return nil
+	}
+	out := make(map[string]string, len(v))
+	for k, val := range v {
+		out[k] = val
+	}
+	return out
 }

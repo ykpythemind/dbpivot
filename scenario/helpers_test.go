@@ -143,8 +143,9 @@ type scenarioDaemon struct {
 }
 
 // startDaemon writes cfg to a temp file, constructs Server + Control, starts
-// them, and registers t.Cleanup to tear everything down.
-func startDaemon(t *testing.T, cfg *config.Config) *scenarioDaemon {
+// them, and registers t.Cleanup to tear everything down. The initial target
+// is activated across all databases at proxy.New time.
+func startDaemon(t *testing.T, cfg *config.Config, initialTarget string, vars map[string]string) *scenarioDaemon {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -153,7 +154,7 @@ func startDaemon(t *testing.T, cfg *config.Config) *scenarioDaemon {
 		cfg.Port = freePort(t)
 	}
 
-	srv, err := proxy.New(cfg, "", logger)
+	srv, err := proxy.New(cfg, "", initialTarget, vars, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

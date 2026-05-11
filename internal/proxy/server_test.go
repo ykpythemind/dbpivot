@@ -89,7 +89,7 @@ func (fu *fakeUpstream) close() { fu.ln.Close() }
 
 func startServer(t *testing.T, cfg *config.Config) *Server {
 	t.Helper()
-	s, err := New(cfg, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s, err := New(cfg, "", "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,6 @@ func TestServer_RouteByDbnameAndRewriteDatabase(t *testing.T) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret", Database: "app_real"},
 				},
@@ -191,7 +190,6 @@ func TestServer_SSLRequestThenStartup(t *testing.T) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret", Database: "app_real"},
 				},
@@ -236,7 +234,6 @@ func TestServer_UnknownDatabaseReturnsErrorResponse(t *testing.T) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: 1, User: "u", Password: "p", Database: "x"},
 				},
@@ -273,7 +270,6 @@ func TestServer_CancelRequestDropped(t *testing.T) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: 1, User: "u", Password: "p", Database: "x"},
 				},
@@ -309,7 +305,6 @@ func TestServer_EmptyDatabasePassthrough(t *testing.T) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret"},
 				},
@@ -348,7 +343,6 @@ func TestServer_BidiPipeAfterAuth(t *testing.T) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret", Database: "app_real"},
 				},

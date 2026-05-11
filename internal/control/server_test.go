@@ -30,7 +30,6 @@ func setup(t *testing.T) (sockPath string, srv *Server, dm *proxy.Server) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default:     "local",
 				Targets: []config.Target{
 					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "app_dev"},
 					{Name: "staging", Host: "127.0.0.1", Port: 15432, User: "u", Password: "p", Database: "app_${BRANCH}_staging"},
@@ -38,7 +37,7 @@ func setup(t *testing.T) (sockPath string, srv *Server, dm *proxy.Server) {
 			},
 		},
 	}
-	d, err := proxy.New(cfg, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d, err := proxy.New(cfg, "", "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,6 +63,9 @@ func TestControl_Status(t *testing.T) {
 	if resp.Port != 6432 {
 		t.Errorf("port = %d", resp.Port)
 	}
+	if resp.CurrentTarget != "local" {
+		t.Errorf("current_target = %q", resp.CurrentTarget)
+	}
 	if len(resp.Databases) != 1 || resp.Databases[0].Current != "local" || resp.Databases[0].CurrentDatabase != "app_dev" {
 		t.Errorf("databases = %+v", resp.Databases)
 	}
@@ -80,7 +82,7 @@ func TestControl_Status_UnknownDatabase(t *testing.T) {
 func TestControl_SwitchOK(t *testing.T) {
 	sock, _, _ := setup(t)
 	resp, err := Call(sock, Request{
-		Cmd: CmdSwitch, VirtualName: "appdb", Target: "staging",
+		Cmd: CmdSwitch, Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -89,14 +91,21 @@ func TestControl_SwitchOK(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("not OK: %v", resp.Error)
 	}
-	if resp.Previous != "local" || resp.Current != "staging" || resp.CurrentDatabase != "app_main_staging" {
-		t.Errorf("%+v", resp)
+	if resp.Target != "staging" {
+		t.Errorf("target = %q", resp.Target)
+	}
+	if len(resp.Switched) != 1 {
+		t.Fatalf("switched = %+v", resp.Switched)
+	}
+	r := resp.Switched[0]
+	if r.VirtualName != "appdb" || r.Previous != "local" || r.Current != "staging" || r.CurrentDatabase != "app_main_staging" {
+		t.Errorf("%+v", r)
 	}
 }
 
 func TestControl_SwitchMissingVariables(t *testing.T) {
 	sock, _, _ := setup(t)
-	resp, err := Call(sock, Request{Cmd: CmdSwitch, VirtualName: "appdb", Target: "staging"})
+	resp, err := Call(sock, Request{Cmd: CmdSwitch, Target: "staging"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,9 +117,9 @@ func TestControl_SwitchMissingVariables(t *testing.T) {
 	}
 }
 
-func TestControl_SwitchUnknownDatabase(t *testing.T) {
+func TestControl_SwitchUnknownTarget(t *testing.T) {
 	sock, _, _ := setup(t)
-	resp, _ := Call(sock, Request{Cmd: CmdSwitch, VirtualName: "nope", Target: "local"})
+	resp, _ := Call(sock, Request{Cmd: CmdSwitch, Target: "nope"})
 	if resp.OK {
 		t.Fatal("expected error")
 	}
@@ -125,14 +134,17 @@ func TestControl_List(t *testing.T) {
 	if !resp.OK || len(resp.ListDatabases) != 1 {
 		t.Fatalf("%+v", resp)
 	}
-	pl := resp.ListDatabases[0]
-	if pl.VirtualName != "appdb" || pl.Default != "local" || pl.Current != "local" {
-		t.Errorf("%+v", pl)
+	if len(resp.TargetNames) != 2 || resp.TargetNames[0] != "local" || resp.TargetNames[1] != "staging" {
+		t.Errorf("target_names = %v", resp.TargetNames)
 	}
-	if len(pl.Targets) != 2 {
-		t.Fatalf("targets = %v", pl.Targets)
+	dl := resp.ListDatabases[0]
+	if dl.VirtualName != "appdb" {
+		t.Errorf("%+v", dl)
 	}
-	if got := pl.Targets[1].RequiredVariables; len(got) != 1 || got[0] != "BRANCH" {
+	if len(dl.Targets) != 2 {
+		t.Fatalf("targets = %v", dl.Targets)
+	}
+	if got := dl.Targets[1].RequiredVariables; len(got) != 1 || got[0] != "BRANCH" {
 		t.Errorf("required = %v", got)
 	}
 }

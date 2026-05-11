@@ -20,11 +20,12 @@ import (
 )
 
 var (
-	flagSocket   string
-	flagJSON     bool
-	flagConfig   string
-	flagLogLevel string
-	flagVars     []string
+	flagSocket    string
+	flagJSON      bool
+	flagConfig    string
+	flagLogLevel  string
+	flagVars      []string
+	flagServeTgt  string
 )
 
 func main() {
@@ -58,7 +59,10 @@ func serveCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&flagConfig, "config", "", "path to config YAML (required)")
 	c.Flags().StringVar(&flagLogLevel, "log-level", "info", "log level (debug|info|warn|error)")
+	c.Flags().StringVar(&flagServeTgt, "target", "", "initial target to activate all databases with (required)")
+	c.Flags().StringSliceVar(&flagVars, "var", nil, "variable in KEY=VAL form (may be repeated or comma-separated)")
 	_ = c.MarkFlagRequired("config")
+	_ = c.MarkFlagRequired("target")
 	return c
 }
 
@@ -84,7 +88,11 @@ func runServe() error {
 		}
 	}
 
-	d, err := proxy.New(cfg, flagConfig, logger)
+	vars, err := parseVars(flagVars)
+	if err != nil {
+		return err
+	}
+	d, err := proxy.New(cfg, flagConfig, flagServeTgt, vars, logger)
 	if err != nil {
 		return err
 	}
@@ -115,16 +123,16 @@ func runServe() error {
 
 func switchCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "switch <database> <target>",
-		Short: "Switch a database to a target",
-		Args:  cobra.ExactArgs(2),
+		Use:   "switch <target>",
+		Short: "Switch every database to <target>",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vars, err := parseVars(flagVars)
 			if err != nil {
 				return err
 			}
 			resp, err := control.Call(flagSocket, control.Request{
-				Cmd: control.CmdSwitch, VirtualName: args[0], Target: args[1], Variables: vars,
+				Cmd: control.CmdSwitch, Target: args[0], Variables: vars,
 			})
 			if err != nil {
 				return err
@@ -139,8 +147,8 @@ func switchCmd() *cobra.Command {
 
 func statusCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "status [database]",
-		Short: "Show current target(s)",
+		Use:   "status [virtual_name]",
+		Short: "Show the active target and per-database state",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			req := control.Request{Cmd: control.CmdStatus}
@@ -223,9 +231,16 @@ func renderSwitch(resp *control.Response) error {
 		}
 		os.Exit(1)
 	}
-	fmt.Printf("%s: %s (db=%s) -> %s (db=%s) (closed %d connection(s))\n",
-		resp.VirtualName, resp.Previous, resp.PreviousDatabase,
-		resp.Current, resp.CurrentDatabase, resp.ClosedConns)
+	fmt.Printf("switched to target %q:\n", resp.Target)
+	for _, r := range resp.Switched {
+		prev := r.Previous
+		if prev == "" {
+			prev = "-"
+		}
+		fmt.Printf("  %s: %s (db=%s) -> %s (db=%s) (closed %d connection(s))\n",
+			r.VirtualName, prev, r.PreviousDatabase,
+			r.Current, r.CurrentDatabase, r.ClosedConns)
+	}
 	return nil
 }
 
@@ -238,7 +253,7 @@ func renderStatus(resp *control.Response) error {
 		fmt.Fprintln(os.Stderr, "error:", resp.Error)
 		os.Exit(1)
 	}
-	fmt.Printf("listening on 127.0.0.1:%d\n", resp.Port)
+	fmt.Printf("listening on 127.0.0.1:%d  current target: %s\n", resp.Port, resp.CurrentTarget)
 	for _, d := range resp.Databases {
 		fmt.Printf("  %s -> %s (db=%s upstream=%s:%d active=%d)\n",
 			d.VirtualName, d.Current, d.CurrentDatabase, d.CurrentHost, d.CurrentPort, d.ActiveConns)
@@ -256,6 +271,9 @@ func renderList(resp *control.Response) error {
 		os.Exit(1)
 	}
 	fmt.Printf("port: %d\n", resp.Port)
+	if len(resp.TargetNames) > 0 {
+		fmt.Printf("targets: %s\n", strings.Join(resp.TargetNames, ", "))
+	}
 	if len(resp.ForwardTargets) > 0 {
 		fmt.Println("forward_targets:")
 		for name, ft := range resp.ForwardTargets {
@@ -263,7 +281,7 @@ func renderList(resp *control.Response) error {
 		}
 	}
 	for _, dl := range resp.ListDatabases {
-		fmt.Printf("database %s (default=%s, current=%s):\n", dl.VirtualName, dl.Default, dl.Current)
+		fmt.Printf("database %s:\n", dl.VirtualName)
 		for _, t := range dl.Targets {
 			endpoint := ""
 			if t.ForwardTo != "" {

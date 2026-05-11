@@ -11,9 +11,9 @@ const (
 // socket (one JSON object per line).
 type Request struct {
 	Cmd         string            `json:"cmd"`
-	VirtualName string            `json:"virtual_name,omitempty"`
-	Target      string            `json:"target,omitempty"`
-	Variables   map[string]string `json:"variables,omitempty"`
+	Target      string            `json:"target,omitempty"`       // switch
+	VirtualName string            `json:"virtual_name,omitempty"` // status filter
+	Variables   map[string]string `json:"variables,omitempty"`    // switch
 }
 
 // Response is the wire format the daemon writes back.
@@ -22,26 +22,33 @@ type Response struct {
 	Error string `json:"error,omitempty"`
 
 	// `switch`
-	VirtualName      string   `json:"virtual_name,omitempty"`
-	Previous         string   `json:"previous,omitempty"`
-	PreviousDatabase string   `json:"previous_database,omitempty"`
-	Current          string   `json:"current,omitempty"`
-	CurrentDatabase  string   `json:"current_database,omitempty"`
-	ClosedConns      int      `json:"closed_conns,omitempty"`
-	Missing          []string `json:"missing,omitempty"`
+	Target   string         `json:"target,omitempty"`
+	Switched []SwitchResult `json:"switched,omitempty"`
+	Missing  []string       `json:"missing,omitempty"` // var names missing on plan failure
 
 	// `status`
-	Port      int              `json:"port,omitempty"`
-	Databases []DatabaseStatus `json:"databases,omitempty"`
+	Port          int              `json:"port,omitempty"`
+	CurrentTarget string           `json:"current_target,omitempty"`
+	Databases     []DatabaseStatus `json:"databases,omitempty"`
 
-	// `list` (also reuses Databases above for status info)
+	// `list`
 	ForwardTargets map[string]ForwardTargetInfo `json:"forward_targets,omitempty"`
+	TargetNames    []string                     `json:"target_names,omitempty"`
 	ListDatabases  []DatabaseList               `json:"list_databases,omitempty"`
 
 	// `reload`
 	DatabasesUpdated int      `json:"databases_updated,omitempty"`
 	DroppedConns     int      `json:"dropped_conns,omitempty"`
 	Warnings         []string `json:"warnings,omitempty"`
+}
+
+type SwitchResult struct {
+	VirtualName      string `json:"virtual_name"`
+	Previous         string `json:"previous,omitempty"`
+	PreviousDatabase string `json:"previous_database,omitempty"`
+	Current          string `json:"current"`
+	CurrentDatabase  string `json:"current_database"`
+	ClosedConns      int    `json:"closed_conns"`
 }
 
 type DatabaseStatus struct {
@@ -55,8 +62,6 @@ type DatabaseStatus struct {
 
 type DatabaseList struct {
 	VirtualName string       `json:"virtual_name"`
-	Default     string       `json:"default"`
-	Current     string       `json:"current"`
 	Targets     []TargetInfo `json:"targets"`
 }
 

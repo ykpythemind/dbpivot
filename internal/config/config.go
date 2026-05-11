@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 )
@@ -41,7 +42,6 @@ type Target struct {
 
 type Database struct {
 	VirtualName string   `yaml:"virtual_name"`
-	Default     string   `yaml:"default"`
 	Targets     []Target `yaml:"targets"`
 }
 
@@ -73,8 +73,8 @@ func Load(path string, logger *slog.Logger) (*Config, error) {
 	return &cfg, nil
 }
 
-// Validate enforces the rules described in the plan. Non-fatal observations
-// are logged as warnings via the provided logger (may be nil).
+// Validate enforces the configuration rules. Non-fatal observations are
+// logged as warnings via the provided logger (may be nil).
 func Validate(cfg *Config, logger *slog.Logger) error {
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		return fmt.Errorf("port must be in [1, 65535], got %d", cfg.Port)
@@ -97,6 +97,7 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 	}
 
 	seenDatabases := make(map[string]struct{})
+	var canonicalTargets []string // sorted target names from the first database
 	for i := range cfg.Databases {
 		d := &cfg.Databases[i]
 		if d.VirtualName == "" {
@@ -115,7 +116,6 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 		}
 
 		seenTargets := make(map[string]struct{})
-		var defaultTarget *Target
 		for j := range d.Targets {
 			t := &d.Targets[j]
 			if t.Name == "" {
@@ -155,46 +155,70 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 				return fmt.Errorf("database %q target %q: password is required", d.VirtualName, t.Name)
 			}
 
-			if t.Name == d.Default {
-				defaultTarget = t
+			// Plain (no-variable) target.database must still be a valid identifier.
+			if t.Database != "" && len(RequiredVars(t.Database)) == 0 && !ValidIdentifier(t.Database) {
+				return fmt.Errorf("database %q target %q: database %q is not a valid identifier", d.VirtualName, t.Name, t.Database)
+			}
+			if t.Database == "" && logger != nil {
+				logger.Warn("target has empty database; client-supplied dbname will be passed through",
+					"virtual_name", d.VirtualName, "target", t.Name)
 			}
 		}
 
-		if defaultTarget == nil {
-			return fmt.Errorf("database %q: default target %q not found in targets", d.VirtualName, d.Default)
-		}
-
-		if vars := RequiredVars(defaultTarget.Database); len(vars) > 0 {
-			return fmt.Errorf("database %q default target %q: database must not require variables (found %v)", d.VirtualName, defaultTarget.Name, vars)
-		}
-		if defaultTarget.Database == "" {
-			if logger != nil {
-				logger.Warn("default target has empty database; client-supplied dbname will be passed through",
-					"virtual_name", d.VirtualName, "target", defaultTarget.Name)
-			}
-		} else if !ValidIdentifier(defaultTarget.Database) {
-			return fmt.Errorf("database %q default target %q: resolved database %q contains invalid characters", d.VirtualName, defaultTarget.Name, defaultTarget.Database)
-		}
-
-		// Sanity-check non-default targets whose database is a plain string
-		// (no variables): must still be a valid identifier when present.
-		for j := range d.Targets {
-			t := &d.Targets[j]
-			if t == defaultTarget {
-				continue
-			}
-			if t.Database == "" {
-				continue
-			}
-			if len(RequiredVars(t.Database)) == 0 {
-				if !ValidIdentifier(t.Database) {
-					return fmt.Errorf("database %q target %q: database %q is not a valid identifier", d.VirtualName, t.Name, t.Database)
-				}
-			}
+		// Cross-database target-set consistency: every database must declare
+		// the exact same set of target names so that `switch <target>` applies
+		// uniformly across all databases.
+		names := sortedTargetNames(d.Targets)
+		if i == 0 {
+			canonicalTargets = names
+		} else if !equalStringSlices(names, canonicalTargets) {
+			return fmt.Errorf("database %q has targets %v but first database has %v; all databases must declare the same target set",
+				d.VirtualName, names, canonicalTargets)
 		}
 	}
 
 	return nil
+}
+
+func sortedTargetNames(targets []Target) []string {
+	out := make([]string, len(targets))
+	for i, t := range targets {
+		out[i] = t.Name
+	}
+	sort.Strings(out)
+	return out
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TargetNames returns the sorted set of target names declared by the first
+// database. Because Validate enforces all databases share the same set, this
+// is the canonical list. Returns nil if cfg has no databases.
+func (cfg *Config) TargetNames() []string {
+	if len(cfg.Databases) == 0 {
+		return nil
+	}
+	return sortedTargetNames(cfg.Databases[0].Targets)
+}
+
+// HasTarget reports whether name is one of the declared target names.
+func (cfg *Config) HasTarget(name string) bool {
+	for _, t := range cfg.Databases[0].Targets {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveEndpoint returns the inline host/port if set, otherwise resolves
@@ -206,3 +230,4 @@ func (t *Target) ResolveEndpoint(fwd map[string]ForwardTarget) (host string, por
 	ft := fwd[t.ForwardTo]
 	return ft.Host, ft.Port
 }
+

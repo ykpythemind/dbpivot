@@ -5,15 +5,16 @@
 アプリの接続文字列を書き換えずに、CLI 一発で接続先を切り替えられる。
 
 ```
-local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (default)
-                                                          →  ssm forward → remote DB
+local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時 --target local)
+                                                    →  ssm forward → remote DB (switch staging で全 DB 同時切替)
 ```
 
 ## 何ができる
 
 - **1 ポートで複数 database を多重化**: アプリは `dbname=<virtual_name>` で接続するだけ。proxy が StartupMessage を読んで database ごとの上流に振り分ける。
 - **`database` の動的書き換え**: アプリは常に同じ dbname で繋ぐが、現在の target に設定された実 DB 名で StartupMessage を書き換えて upstream へ送る。
-- **テンプレート変数**: `app_${BRANCH}_staging` のように書いておき、`switch` 時に `--var BRANCH=main` で展開。
+- **target は環境**: `local` / `staging` / `prod` のように **全 database で共通の target 名集合** を持つ。`switch <target>` は全 database を同時に切り替える (二相 commit、どれか失敗したら全部やらない)。
+- **テンプレート変数**: `app_${BRANCH}_staging` のように書いておき、`switch` や `serve` 時に `--var BRANCH=main` で展開。
 - **既存接続の即時切断**: 切替時に該当 database の全接続を force-close。クライアントは再接続するだけで新ターゲットへ。
 - **SCRAM-SHA-256 代理認証**: client → proxy は trust auth、proxy → upstream は SCRAM-SHA-256 で本物の認証。target ごとに user/password を持つ。
 - **ssm port-forward と相性◎**: `aws ssm start-session --document-name AWS-StartPortForwardingSessionToRemoteHost` 等でローカルに立てた forward 先を `forward_targets` として参照するだけ。ssm 自体は管理しない。
@@ -35,7 +36,7 @@ MySQL / MongoDB、TLS、CancelRequest ルーティング、MD5/cleartext upstrea
 
 ```yaml
 port: 6432                                   # アプリが接続する単一の listen port (127.0.0.1)
-control_socket: /tmp/dbpivot.sock     # 省略可
+control_socket: /tmp/dbpivot.sock            # 省略可
 
 forward_targets:                             # 省略可。inline 派なら不要
   ssm-staging:
@@ -47,16 +48,15 @@ forward_targets:                             # 省略可。inline 派なら不�
 
 databases:
   - virtual_name: appdb                      # アプリは dbname=appdb で接続 (= 論理名)
-    default: local
     targets:
-      - name: local
-        host: 127.0.0.1                      # inline
+      - name: local                          # target 名は全 database で共通必須
+        host: 127.0.0.1
         port: 5432
         user: postgres
         password: localpass
-        database: app_dev                    # 物理 DB 名 (default は variables 不可)
+        database: app_dev                    # 物理 DB 名
       - name: staging
-        forward_to: ssm-staging              # 名前参照
+        forward_to: ssm-staging
         user: app_staging_user
         password: stg_password
         database: app_${BRANCH}_staging      # switch 時に --var BRANCH=... 必須
@@ -67,19 +67,28 @@ databases:
         database: app_${USER}_prod
 
   - virtual_name: analytics
-    default: local
     targets:
-      - name: local
+      - name: local                          # 同じ target 名集合 {local, staging, prod}
         host: 127.0.0.1
         port: 5432
         user: postgres
         password: localpass
         database: analytics_dev
+      - name: staging
+        forward_to: ssm-staging
+        user: analytics_staging_user
+        password: stg_password
+        database: analytics_staging
+      - name: prod
+        forward_to: ssm-prod
+        user: analytics_prod_user
+        password: prod_password
+        database: analytics_prod
 ```
 
 ### バリデーション要点
 
-- `default` target の `database` は `${VAR}` を含めない (起動時に解決手段がないため)。
+- **全 database は同じ target 名集合を持たなければならない** (例: 全部 `{local, staging, prod}`)。違うと起動時にエラー。
 - target は inline (`host` + `port`) か `forward_to` のどちらか一方 (XOR)。
 - `user`, `password` は target ごとに必須 (SCRAM 代理認証で使う)。
 - `virtual_name` と target の `database` は PG 識別子規則 (`^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$`)。
@@ -94,8 +103,14 @@ go build -o dbpivot ./cmd/dbpivot
 
 ### 起動
 
+起動時に `--target` で全 database に適用する target を指定する。テンプレート変数が必要なら `--var KEY=VAL` も併用。
+
 ```bash
-dbpivot serve --config ./config.yaml
+# シンプル: ローカル DB に向ける
+dbpivot serve --config ./config.yaml --target local
+
+# 起動時から staging に繋ぎたい (BRANCH 必須)
+dbpivot serve --config ./config.yaml --target staging --var BRANCH=main
 ```
 
 ### 接続
@@ -111,11 +126,11 @@ psql 'host=127.0.0.1 port=6432 user=anyuser dbname=appdb password=anything sslmo
 ### CLI
 
 ```
-dbpivot serve   --config PATH [--socket PATH] [--log-level info|debug]
-dbpivot switch  <database> <target> [--var KEY=VAL]... [--socket PATH] [--json]
-dbpivot status  [<database>]                            [--socket PATH] [--json]
-dbpivot list                                        [--socket PATH] [--json]
-dbpivot reload                                      [--socket PATH] [--json]
+dbpivot serve   --config PATH --target TARGET [--var KEY=VAL]... [--socket PATH] [--log-level info|debug]
+dbpivot switch  <target> [--var KEY=VAL]... [--socket PATH] [--json]
+dbpivot status  [<virtual_name>]            [--socket PATH] [--json]
+dbpivot list                                [--socket PATH] [--json]
+dbpivot reload                              [--socket PATH] [--json]
 ```
 
 例:
@@ -123,16 +138,20 @@ dbpivot reload                                      [--socket PATH] [--json]
 ```bash
 # 確認
 dbpivot status
-# appdb -> local (db=app_dev upstream=127.0.0.1:5432 active=0)
+# listening on 127.0.0.1:6432  current target: local
+#   appdb     -> local (db=app_dev upstream=127.0.0.1:5432 active=0)
+#   analytics -> local (db=analytics_dev upstream=127.0.0.1:5432 active=0)
 
-# 切替 (variables 必須の target)
-dbpivot switch appdb staging --var BRANCH=main
-# appdb: local (db=app_dev) -> staging (db=app_main_staging) (closed 0 connection(s))
+# 全 database を staging に同時切替
+dbpivot switch staging --var BRANCH=main
+# switched to target "staging":
+#   appdb:     local (db=app_dev) -> staging (db=app_main_staging) (closed 0 connection(s))
+#   analytics: local (db=analytics_dev) -> staging (db=analytics_staging) (closed 0 connection(s))
 
 # 戻す
-dbpivot switch appdb local
+dbpivot switch local
 
-# 設定を再読込 (port 変更は再起動必須)
+# 設定を再読込 (port 変更は再起動必須。現在の target+vars は保持)
 dbpivot reload
 ```
 
@@ -143,8 +162,8 @@ cmd/dbpivot/main.go        // cobra CLI
 internal/
   config/    config.go             // YAML ロード + バリデーション
              variables.go          // ${VAR} 展開
-  proxy/     server.go             // 単一 TCP listener + accept + 振り分け
-             database.go               // Database, Switch, conn registry
+  proxy/     server.go             // 単一 TCP listener + accept + 振り分け + SwitchAll
+             database.go           // Database, ResolveTarget / Apply, conn registry
              pgwire.go             // PG メッセージ framing と各種 encode/decode
              auth.go               // upstream SCRAM-SHA-256 driver
   control/   protocol.go           // Req/Res 型

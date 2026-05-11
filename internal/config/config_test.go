@@ -14,7 +14,6 @@ func baseCfg() *Config {
 		Databases: []Database{
 			{
 				VirtualName: "appdb",
-				Default:     "local",
 				Targets: []Target{
 					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "postgres", Password: "pass", Database: "app_dev"},
 					{Name: "staging", ForwardTo: "ssm-staging", User: "u", Password: "p", Database: "app_${BRANCH}_staging"},
@@ -59,16 +58,19 @@ func TestValidate_Errors(t *testing.T) {
 		{"forward_to_undefined", func(c *Config) { c.Databases[0].Targets[1].ForwardTo = "missing" }, "not defined"},
 		{"target_user_missing", func(c *Config) { c.Databases[0].Targets[0].User = "" }, "user is required"},
 		{"target_password_missing", func(c *Config) { c.Databases[0].Targets[0].Password = "" }, "password is required"},
-		{"default_not_in_targets", func(c *Config) { c.Databases[0].Default = "nope" }, "default target"},
-		{"default_database_has_variable", func(c *Config) {
-			c.Databases[0].Targets[0].Database = "app_${BRANCH}_dev"
-		}, "must not require variables"},
-		{"default_database_invalid_chars", func(c *Config) {
+		{"plain_target_database_invalid", func(c *Config) {
 			c.Databases[0].Targets[0].Database = "bad name"
-		}, "invalid characters"},
-		{"plain_nondefault_database_invalid", func(c *Config) {
-			c.Databases[0].Targets[1].Database = "bad name"
 		}, "not a valid identifier"},
+		{"target_set_mismatch", func(c *Config) {
+			second := Database{
+				VirtualName: "analytics",
+				Targets: []Target{
+					{Name: "local", Host: "127.0.0.1", Port: 5432, User: "u", Password: "p", Database: "an_dev"},
+					// missing "staging" — different target set
+				},
+			}
+			c.Databases = append(c.Databases, second)
+		}, "all databases must declare the same target set"},
 		{"forward_target_bad_port", func(c *Config) {
 			c.ForwardTargets["x"] = ForwardTarget{Host: "h", Port: 0}
 		}, "port out of range"},
@@ -91,11 +93,22 @@ func TestValidate_Errors(t *testing.T) {
 	}
 }
 
-func TestValidate_DefaultEmptyDatabase_OK(t *testing.T) {
+func TestValidate_EmptyTargetDatabaseOK(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Databases[0].Targets[0].Database = ""
 	if err := Validate(cfg, nil); err != nil {
-		t.Fatalf("empty default database should validate (with warn), got: %v", err)
+		t.Fatalf("empty target database should validate (with warn), got: %v", err)
+	}
+}
+
+func TestTargetNames(t *testing.T) {
+	cfg := baseCfg()
+	got := cfg.TargetNames()
+	if len(got) != 2 || got[0] != "local" || got[1] != "staging" {
+		t.Errorf("TargetNames = %v", got)
+	}
+	if !cfg.HasTarget("local") || !cfg.HasTarget("staging") || cfg.HasTarget("prod") {
+		t.Errorf("HasTarget logic wrong")
 	}
 }
 

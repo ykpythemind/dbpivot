@@ -15,9 +15,11 @@ import (
 )
 
 // Daemon is the interface the control server expects from the running
-// proxy.Server: it can resolve databases, switch them, and report shutdown.
+// proxy.Server.
 type Daemon interface {
 	Databases() map[string]*proxy.Database
+	CurrentTarget() (string, map[string]string)
+	SwitchAll(target string, vars map[string]string) ([]proxy.SwitchResult, error)
 	Addr() string
 	IsClosed() bool
 	Reload() (updated int, dropped int, warnings []string, err error)
@@ -108,45 +110,49 @@ func (s *Server) writeResp(c net.Conn, resp Response) {
 }
 
 func (s *Server) handleSwitch(c net.Conn, req *Request) {
-	if req.VirtualName == "" || req.Target == "" {
-		s.writeResp(c, Response{OK: false, Error: "virtual_name and target are required"})
+	if req.Target == "" {
+		s.writeResp(c, Response{OK: false, Error: "target is required"})
 		return
 	}
-	d, ok := s.daemon.Databases()[req.VirtualName]
-	if !ok {
-		s.writeResp(c, Response{OK: false, Error: fmt.Sprintf("unknown virtual_name %q", req.VirtualName)})
-		return
-	}
-
-	prev := d.Current()
-	_, closedConns, missing, err := d.Switch(req.Target, req.Variables)
+	results, err := s.daemon.SwitchAll(req.Target, req.Variables)
 	if err != nil {
 		resp := Response{OK: false, Error: err.Error()}
-		if len(missing) > 0 {
-			resp.Missing = missing
+		var planErr *proxy.SwitchPlanError
+		if errors.As(err, &planErr) && len(planErr.Missing) > 0 {
+			resp.Missing = planErr.Missing
 		}
 		s.writeResp(c, resp)
 		return
 	}
-	cur := d.Current()
+	wire := make([]SwitchResult, len(results))
+	for i, r := range results {
+		wire[i] = SwitchResult{
+			VirtualName:      r.VirtualName,
+			Previous:         r.Previous,
+			PreviousDatabase: r.PreviousDatabase,
+			Current:          r.Current,
+			CurrentDatabase:  r.CurrentDatabase,
+			ClosedConns:      r.ClosedConns,
+		}
+	}
 	s.writeResp(c, Response{
-		OK:               true,
-		VirtualName:      req.VirtualName,
-		Previous:         prev.Name,
-		PreviousDatabase: prev.Database,
-		Current:          cur.Name,
-		CurrentDatabase:  cur.Database,
-		ClosedConns:      closedConns,
+		OK:       true,
+		Target:   req.Target,
+		Switched: wire,
 	})
 }
 
 func (s *Server) handleStatus(c net.Conn, req *Request) {
-	resp := Response{OK: true, Port: s.cfg.Port}
+	target, _ := s.daemon.CurrentTarget()
+	resp := Response{OK: true, Port: s.cfg.Port, CurrentTarget: target}
 	for name, d := range s.daemon.Databases() {
 		if req.VirtualName != "" && req.VirtualName != name {
 			continue
 		}
-		cur := d.Current()
+		cur, ok := d.Current()
+		if !ok {
+			continue
+		}
 		resp.Databases = append(resp.Databases, DatabaseStatus{
 			VirtualName:     name,
 			Current:         cur.Name,
@@ -164,7 +170,7 @@ func (s *Server) handleStatus(c net.Conn, req *Request) {
 }
 
 func (s *Server) handleList(c net.Conn, _ *Request) {
-	resp := Response{OK: true, Port: s.cfg.Port}
+	resp := Response{OK: true, Port: s.cfg.Port, TargetNames: s.cfg.TargetNames()}
 	if len(s.cfg.ForwardTargets) > 0 {
 		resp.ForwardTargets = make(map[string]ForwardTargetInfo, len(s.cfg.ForwardTargets))
 		for name, ft := range s.cfg.ForwardTargets {
@@ -172,11 +178,7 @@ func (s *Server) handleList(c net.Conn, _ *Request) {
 		}
 	}
 	for _, cdb := range s.cfg.Databases {
-		d := s.daemon.Databases()[cdb.VirtualName]
-		dl := DatabaseList{VirtualName: cdb.VirtualName, Default: cdb.Default}
-		if d != nil {
-			dl.Current = d.Current().Name
-		}
+		dl := DatabaseList{VirtualName: cdb.VirtualName}
 		for _, t := range cdb.Targets {
 			vars := config.RequiredVars(t.Database)
 			if vars == nil {

@@ -46,8 +46,8 @@ func (c *Conn) Close() {
 }
 
 // Database holds the routing state for one logical database (= one dbname
-// clients connect with). Targets and the forward map are immutable after
-// creation (use Replace under the Server's coordination to swap them on reload).
+// clients connect with). The current target is unset until Apply is called;
+// Server activates all databases before accepting traffic.
 type Database struct {
 	virtualName string
 	targets     []config.Target
@@ -60,7 +60,7 @@ type Database struct {
 	conns map[*Conn]struct{}
 }
 
-func NewDatabase(c config.Database, fwd map[string]config.ForwardTarget) (*Database, error) {
+func NewDatabase(c config.Database, fwd map[string]config.ForwardTarget) *Database {
 	out := &Database{
 		virtualName: c.VirtualName,
 		targets:     append([]config.Target(nil), c.Targets...),
@@ -71,34 +71,28 @@ func NewDatabase(c config.Database, fwd map[string]config.ForwardTarget) (*Datab
 	for i := range out.targets {
 		out.byName[out.targets[i].Name] = &out.targets[i]
 	}
-
-	def := out.byName[c.Default]
-	if def == nil {
-		return nil, fmt.Errorf("database %q: default target %q missing", c.VirtualName, c.Default)
-	}
-	host, port := def.ResolveEndpoint(fwd)
-	out.current.Store(&ResolvedTarget{
-		Name:     def.Name,
-		Host:     host,
-		Port:     port,
-		User:     def.User,
-		Password: def.Password,
-		Database: def.Database,
-	})
-	return out, nil
+	return out
 }
 
 // VirtualName returns the configured virtual_name (= the dbname clients connect with).
 func (d *Database) VirtualName() string { return d.virtualName }
 
-// Current returns the active resolved target.
-func (d *Database) Current() ResolvedTarget { return *d.current.Load() }
+// Current returns the active resolved target. Returns the zero value and
+// false if the database has not been activated yet.
+func (d *Database) Current() (ResolvedTarget, bool) {
+	p := d.current.Load()
+	if p == nil {
+		return ResolvedTarget{}, false
+	}
+	return *p, true
+}
 
 // Targets returns the original config Targets (for status/list).
 func (d *Database) Targets() []config.Target { return d.targets }
 
 // ResolveTarget returns the named target's snapshot after substituting
-// variables into its database template. It does NOT touch d.current.
+// variables into its database template. It does NOT touch d.current — this
+// is the planning phase of a switch.
 func (d *Database) ResolveTarget(name string, vars map[string]string) (ResolvedTarget, []string, error) {
 	t, ok := d.byName[name]
 	if !ok {
@@ -125,18 +119,14 @@ func (d *Database) ResolveTarget(name string, vars map[string]string) (ResolvedT
 	}, nil, nil
 }
 
-// Switch atomically updates current to the named target (with variables) and
-// closes all currently registered connections. Returns the previous resolved
-// target and how many connections were closed.
-func (d *Database) Switch(name string, vars map[string]string) (prev ResolvedTarget, closed int, missing []string, err error) {
-	rt, miss, err := d.ResolveTarget(name, vars)
-	if err != nil {
-		return ResolvedTarget{}, 0, miss, err
-	}
-	prev = *d.current.Load()
+// Apply atomically swaps in rt as the current target and force-closes every
+// previously-registered connection. Returns the previous target (nil if this
+// is the first activation) and how many connections were closed.
+func (d *Database) Apply(rt ResolvedTarget) (prev *ResolvedTarget, closed int) {
+	prev = d.current.Load()
 	d.current.Store(&rt)
 	closed = d.dropAll()
-	return prev, closed, nil, nil
+	return prev, closed
 }
 
 // Register adds c to the active set under d.mu.

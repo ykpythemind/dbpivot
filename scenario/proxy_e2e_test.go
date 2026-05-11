@@ -30,7 +30,6 @@ func TestScenario_RouteAndRewriteDatabase(t *testing.T) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{
 						Name: "local", Host: pg.Host, Port: pg.Port,
@@ -44,7 +43,7 @@ func TestScenario_RouteAndRewriteDatabase(t *testing.T) {
 			},
 		},
 	}
-	d := startDaemon(t, cfg)
+	d := startDaemon(t, cfg, "local", nil)
 
 	got := queryCurrentDatabase(t, ctx, d.Addr, "appdb")
 	if got != "app_dev" {
@@ -52,7 +51,7 @@ func TestScenario_RouteAndRewriteDatabase(t *testing.T) {
 	}
 
 	resp, err := control.Call(d.Sock, control.Request{
-		Cmd: control.CmdSwitch, VirtualName: "appdb", Target: "staging",
+		Cmd: control.CmdSwitch, Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -61,8 +60,8 @@ func TestScenario_RouteAndRewriteDatabase(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("switch not OK: %v (missing=%v)", resp.Error, resp.Missing)
 	}
-	if resp.CurrentDatabase != "app_main_staging" {
-		t.Errorf("switch current_database = %q, want app_main_staging", resp.CurrentDatabase)
+	if len(resp.Switched) != 1 || resp.Switched[0].CurrentDatabase != "app_main_staging" {
+		t.Errorf("switched = %+v", resp.Switched)
 	}
 
 	got = queryCurrentDatabase(t, ctx, d.Addr, "appdb")
@@ -87,7 +86,6 @@ func TestScenario_SwitchDropsExistingConn(t *testing.T) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
 					{Name: "staging", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_${BRANCH}_staging"},
@@ -95,7 +93,7 @@ func TestScenario_SwitchDropsExistingConn(t *testing.T) {
 			},
 		},
 	}
-	d := startDaemon(t, cfg)
+	d := startDaemon(t, cfg, "local", nil)
 
 	dsn := fmt.Sprintf("postgres://anyone:any@%s/appdb?sslmode=disable", d.Addr)
 	long, err := pgx.Connect(ctx, dsn)
@@ -114,7 +112,7 @@ func TestScenario_SwitchDropsExistingConn(t *testing.T) {
 	}
 
 	resp, err := control.Call(d.Sock, control.Request{
-		Cmd: control.CmdSwitch, VirtualName: "appdb", Target: "staging",
+		Cmd: control.CmdSwitch, Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -123,8 +121,8 @@ func TestScenario_SwitchDropsExistingConn(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("switch not OK: %v", resp.Error)
 	}
-	if resp.ClosedConns < 1 {
-		t.Errorf("expected closed_conns >= 1, got %d", resp.ClosedConns)
+	if len(resp.Switched) != 1 || resp.Switched[0].ClosedConns < 1 {
+		t.Errorf("expected closed_conns >= 1, got %+v", resp.Switched)
 	}
 
 	// The old connection should be dead now.
@@ -156,14 +154,13 @@ func TestScenario_UnknownDatabaseErrorResponse(t *testing.T) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
 				},
 			},
 		},
 	}
-	d := startDaemon(t, cfg)
+	d := startDaemon(t, cfg, "local", nil)
 
 	dsn := fmt.Sprintf("postgres://anyone:any@%s/nonexistent?sslmode=disable", d.Addr)
 	_, err := pgx.Connect(ctx, dsn)
@@ -188,7 +185,6 @@ func TestScenario_StatusAndList(t *testing.T) {
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
 					{Name: "staging", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_${BRANCH}_staging"},
@@ -196,7 +192,7 @@ func TestScenario_StatusAndList(t *testing.T) {
 			},
 		},
 	}
-	d := startDaemon(t, cfg)
+	d := startDaemon(t, cfg, "local", nil)
 
 	st, err := control.Call(d.Sock, control.Request{Cmd: control.CmdStatus})
 	if err != nil {
@@ -245,7 +241,6 @@ CREATE TABLE items (
 		Databases: []config.Database{
 			{
 				VirtualName: "appdb",
-				Default: "local",
 				Targets: []config.Target{
 					{Name: "local", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_dev"},
 					{Name: "staging", Host: pg.Host, Port: pg.Port, User: pg.User, Password: pg.Pass, Database: "app_${BRANCH}_staging"},
@@ -253,7 +248,7 @@ CREATE TABLE items (
 			},
 		},
 	}
-	d := startDaemon(t, cfg)
+	d := startDaemon(t, cfg, "local", nil)
 
 	// 1. Default target → app_dev rows.
 	if rows := selectItems(t, ctx, d.Addr, "appdb"); !equalRows(rows, []itemRow{
@@ -264,7 +259,7 @@ CREATE TABLE items (
 
 	// 2. Switch to staging.
 	resp, err := control.Call(d.Sock, control.Request{
-		Cmd: control.CmdSwitch, VirtualName: "appdb", Target: "staging",
+		Cmd: control.CmdSwitch, Target: "staging",
 		Variables: map[string]string{"BRANCH": "main"},
 	})
 	if err != nil {
@@ -282,7 +277,7 @@ CREATE TABLE items (
 	}
 
 	// 4. Switch back, confirm we see the dev dataset again.
-	if _, err := control.Call(d.Sock, control.Request{Cmd: control.CmdSwitch, VirtualName: "appdb", Target: "local"}); err != nil {
+	if _, err := control.Call(d.Sock, control.Request{Cmd: control.CmdSwitch, Target: "local"}); err != nil {
 		t.Fatal(err)
 	}
 	if rows := selectItems(t, ctx, d.Addr, "appdb"); !equalRows(rows, []itemRow{
