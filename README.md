@@ -198,23 +198,11 @@ go test ./...
 go test -tags=integration_test ./integration_test/...
 ```
 
-`integration_test/` 配下は `//go:build integration_test` で守られているので通常実行では走らない。`testcontainers-go` で Postgres 16 を立て、SCRAM 認証込みで:
-
-- dbname → database ルーティングと `database` 書き換え
-- use による既存接続の force-close
-- 同一スキーマ + 別データの切替検証
-- 未知 database での PG ErrorResponse
-- control plane (`status` / `use`)
-
-を verify する。
-
 CLI レイヤを含む e2e は `e2e/run.sh` から走らせる (docker / psql / jq / go 必須):
 
 ```bash
 ./e2e/run.sh
 ```
-
-postgres を 2 つ起動 → スキーマ流して別データ投入 → `dbpivot serve` と tiny web server を起動 → HTTP 経由で SELECT → `dbpivot use` で切替えて差分を確認、を行う。
 
 ## 設計の詳細
 
