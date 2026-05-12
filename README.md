@@ -11,13 +11,11 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時
 
 ## 何ができる
 
-- **1 ポートで複数 database を多重化**: アプリは `dbname=<virtual_name>` で接続するだけ。proxy が StartupMessage を読んで database ごとの上流に振り分ける。
-- **`database` の動的書き換え**: アプリは常に同じ dbname で繋ぐが、現在の target に設定された実 DB 名で StartupMessage を書き換えて upstream へ送る。
-- **target は環境**: `local` / `staging` / `prod` のように database ごとに target 名集合を持つ。`dbpivot use <target>` は **その target を持つ database 全部を同時に切り替える**。target を持たない database は warning ログを出して inactive 化 (= 該当 dbname へ来た client connection は PG ErrorResponse で即返す)。すべての database が target を持たない場合のみ全体エラー。
-- **テンプレート変数**: `app_${BRANCH}_staging` のように書いておき、`use` や `serve` 時に `--var BRANCH=main` で展開。
-- **既存接続の即時切断**: 切替時に該当 database の全接続を force-close。クライアントは再接続するだけで新ターゲットへ。
-- **SCRAM-SHA-256 代理認証**: client → proxy は trust auth、proxy → upstream は SCRAM-SHA-256 で本物の認証。target ごとに user/password を持つ。
-- **ssm port-forward と相性◎**: `aws ssm start-session --document-name AWS-StartPortForwardingSessionToRemoteHost` 等でローカルに立てた forward 先を `forward_targets` として参照するだけ。ssm 自体は管理しない。
+- **dbname だけで複数 DB を多重化**: アプリは `dbname=<virtual_name>` で 1 ポートに繋ぐだけ。proxy がどの上流に流すかを決める。
+- **target 単位で一括切替**: `local` / `staging` / `prod` などの target を持っておき、`dbpivot use <target>` で全 database を同時に切り替える。
+- **接続先 DB 名のテンプレ化**: `database: app_${BRANCH}_staging` のように書いておき、`use` / `serve` 時に `--var BRANCH=main` で展開。
+- **ssm port-forward と相性◎**: 事前に立てた `127.0.0.1:15432` のようなローカル forward 先を `forward_targets` として参照するだけ。ssm 自体は管理しない。
+- **切替時は既存接続を即時切断**: クライアントは再接続で新しい上流に自然に乗り換わる。
 
 ## v1 のスコープ
 
@@ -27,10 +25,10 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時
 | client → proxy 認証 | **trust** (任意 password で受理) |
 | proxy → upstream 認証 | **SCRAM-SHA-256 のみ** (PG 14+ デフォルト) |
 | TLS | 無し (SSLRequest には `N` を返す) |
-| CancelRequest | v1 では捨てる (BackendKeyData のルーティング未実装) |
+| CancelRequest | v1 では捨てる |
 | 切替時の既存接続 | 即時切断 |
 
-MySQL / MongoDB、TLS、CancelRequest ルーティング、MD5/cleartext upstream auth は v1 のスコープ外。
+MySQL / MongoDB、TLS、MD5/cleartext upstream auth は v1 のスコープ外。
 
 ## 設定ファイル
 
@@ -52,7 +50,7 @@ databases:
   - adapter: postgres                        # 必須。v1 では `postgres` のみサポート
     virtual_name: appdb                      # アプリは dbname=appdb で接続 (= 論理名)
     targets:
-      - name: local                          # target 名は全 database で共通必須
+      - name: local                          # target 名は全 database で共通推奨
         host: 127.0.0.1
         port: 5432
         user: postgres
@@ -92,10 +90,10 @@ databases:
 
 ### バリデーション要点
 
-- 各 database には `adapter` が必須。v1 でサポートされるのは `postgres` のみ (未指定や未知の値は起動時エラー)。
-- 全 database が同じ target 名集合を持つことを推奨 (例: 全部 `{local, staging, prod}`)。違っていても起動はする (warning ログ) — DB が staging にまだ用意できていない、といった移行途中の状態を許容するため。`dbpivot use <target>` 実行時、その target を持たない database は warning を出して inactive 化される (該当 dbname への新規接続は PG ErrorResponse `57P03 "no active target"`)。target を持つ database が 1 つも無ければ全体エラー。
+- 各 database には `adapter` が必須。v1 でサポートされるのは `postgres` のみ。
+- 全 database が同じ target 名集合を持つことを推奨。違っていても起動はする (warning) — DB が staging にまだ用意できていない、といった移行途中の状態を許容するため。`use <target>` 時にその target を持たない database は inactive 化される。
 - target は inline (`host` + `port`) か `forward_to` のどちらか一方 (XOR)。
-- `user`, `password` は target ごとに必須 (SCRAM 代理認証で使う)。
+- `user`, `password` は target ごとに必須。
 - `virtual_name` と target の `database` は PG 識別子規則 (`^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$`)。
 
 ## 使い方
