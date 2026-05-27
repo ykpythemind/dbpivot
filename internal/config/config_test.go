@@ -40,6 +40,14 @@ func TestValidate_SSLModeRequireOK(t *testing.T) {
 	}
 }
 
+func TestValidate_MySQLAdapterOK(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Databases[0].Adapter = AdapterMySQL
+	if err := Validate(cfg, nil); err != nil {
+		t.Fatalf("all-mysql config should validate: %v", err)
+	}
+}
+
 func TestValidate_Errors(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -83,6 +91,16 @@ func TestValidate_Errors(t *testing.T) {
 		{"sslmode_unsupported", func(c *Config) {
 			c.Databases[0].Targets[1].SSLMode = "verify-full"
 		}, "unsupported sslmode"},
+		{"mixed_adapters", func(c *Config) {
+			second := c.Databases[0]
+			second.VirtualName = "other"
+			second.Adapter = AdapterMySQL
+			c.Databases = append(c.Databases, second)
+		}, "must share one adapter"},
+		{"mysql_sslmode_require_unsupported", func(c *Config) {
+			c.Databases[0].Adapter = AdapterMySQL
+			c.Databases[0].Targets[1].SSLMode = SSLModeRequire
+		}, "not yet supported for the mysql adapter"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

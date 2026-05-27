@@ -11,6 +11,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ykpythemind/dbpivot/internal/config"
@@ -39,6 +40,15 @@ type Server struct {
 	addr   string
 	logger *slog.Logger
 
+	// adapter is the wire protocol this server speaks on its single listen
+	// port. All databases in a config share one adapter (enforced by
+	// config.Validate), so the listener can commit to one handshake style.
+	adapter string
+
+	// connSeq hands out monotonically increasing per-connection ids, used as
+	// the MySQL connection id advertised in the greeting.
+	connSeq atomic.Uint32
+
 	listener net.Listener
 
 	mu            sync.RWMutex
@@ -62,8 +72,13 @@ func New(cfg *config.Config, target string, vars map[string]string, logger *slog
 	for _, c := range cfg.Databases {
 		databases[c.VirtualName] = NewDatabase(c, cfg.ForwardTargets)
 	}
+	adapter := config.AdapterPostgres
+	if len(cfg.Databases) > 0 && cfg.Databases[0].Adapter != "" {
+		adapter = cfg.Databases[0].Adapter
+	}
 	s := &Server{
 		addr:        net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Port)),
+		adapter:     adapter,
 		databases:   databases,
 		cfg:         cfg,
 		currentVars: cloneVars(vars),
@@ -267,10 +282,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) handleConn(client net.Conn) {
 	defer client.Close()
-	if err := s.dispatch(client); err != nil {
-		if !errors.Is(err, io.EOF) {
-			s.logger.Warn("conn closed", "remote", client.RemoteAddr(), "err", err)
-		}
+	var err error
+	switch s.adapter {
+	case config.AdapterMySQL:
+		err = s.dispatchMySQL(client)
+	default:
+		err = s.dispatch(client)
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		s.logger.Warn("conn closed", "remote", client.RemoteAddr(), "err", err)
 	}
 }
 

@@ -49,17 +49,20 @@ type Target struct {
 
 type Database struct {
 	// Adapter selects the wire protocol used for both the client→proxy and
-	// proxy→upstream legs of this database. v1 only supports
-	// AdapterPostgres; the field is required (no default) so configs are
-	// explicit about which protocol they assume.
+	// proxy→upstream legs of this database (AdapterPostgres or AdapterMySQL).
+	// The field is required (no default) so configs are explicit about which
+	// protocol they assume. All databases in one config must share an adapter
+	// since they share a single listen port.
 	Adapter     string   `yaml:"adapter"`
 	VirtualName string   `yaml:"virtual_name"`
 	Targets     []Target `yaml:"targets"`
 }
 
-// Adapter values. v1 only ships AdapterPostgres; new adapters added later
-// (mysql, mongo, ...) extend this set.
-const AdapterPostgres = "postgres"
+// Adapter values. New adapters added later (mongo, ...) extend this set.
+const (
+	AdapterPostgres = "postgres"
+	AdapterMySQL    = "mysql"
+)
 
 // SSL modes for the proxy→upstream leg.
 const (
@@ -72,7 +75,7 @@ var SupportedSSLModes = []string{SSLModeDisable, SSLModeRequire}
 
 // SupportedAdapters lists every adapter the validator accepts. Kept sorted
 // for stable error messages.
-var SupportedAdapters = []string{AdapterPostgres}
+var SupportedAdapters = []string{AdapterMySQL, AdapterPostgres}
 
 type Config struct {
 	Port           int                      `yaml:"port"`
@@ -148,6 +151,7 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 
 	seenDatabases := make(map[string]struct{})
 	var canonicalTargets []string // sorted target names from the first database
+	var firstAdapter string       // adapter declared by the first database
 	for i := range cfg.Databases {
 		d := &cfg.Databases[i]
 		if d.VirtualName == "" {
@@ -166,6 +170,14 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 		}
 		if !isSupportedAdapter(d.Adapter) {
 			return fmt.Errorf("database %q: unsupported adapter %q (supported: %v)", d.VirtualName, d.Adapter, SupportedAdapters)
+		}
+		// All databases share a single listen port. PostgreSQL is client-first
+		// while MySQL is server-first, so the proxy must commit to one wire
+		// protocol per port; mixing adapters on one instance is rejected.
+		if i == 0 {
+			firstAdapter = d.Adapter
+		} else if d.Adapter != firstAdapter {
+			return fmt.Errorf("database %q: adapter %q differs from the first database's adapter %q; all databases must share one adapter", d.VirtualName, d.Adapter, firstAdapter)
 		}
 
 		if len(d.Targets) == 0 {
@@ -214,6 +226,11 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 
 			if t.SSLMode != "" && !isSupportedSSLMode(t.SSLMode) {
 				return fmt.Errorf("database %q target %q: unsupported sslmode %q (supported: %v)", d.VirtualName, t.Name, t.SSLMode, SupportedSSLModes)
+			}
+			// MySQL upstream TLS (in-band CLIENT_SSL negotiation) is not yet
+			// implemented; reject require rather than accept an unservable config.
+			if d.Adapter == AdapterMySQL && t.SSLMode == SSLModeRequire {
+				return fmt.Errorf("database %q target %q: sslmode %q is not yet supported for the mysql adapter", d.VirtualName, t.Name, t.SSLMode)
 			}
 
 			// Plain (no-variable) target.database must still be a valid identifier.
@@ -315,4 +332,3 @@ func (t *Target) ResolveEndpoint(fwd map[string]ForwardTarget) (host string, por
 	ft := fwd[t.ForwardTo]
 	return ft.Host, ft.Port
 }
-
