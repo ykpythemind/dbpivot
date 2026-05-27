@@ -38,6 +38,13 @@ type Target struct {
 	User     string `yaml:"user"`
 	Password string `yaml:"password"`
 	Database string `yaml:"database,omitempty"`
+
+	// SSLMode controls the proxy→upstream TLS leg. v1 supports:
+	//   "disable" (default) — connect in plaintext (local PG / trusted networks)
+	//   "require"           — negotiate TLS (SSLRequest) but skip cert verification,
+	//                         enough to reach RDS instances with rds.force_ssl=1.
+	// Empty is treated as "disable".
+	SSLMode string `yaml:"sslmode,omitempty"`
 }
 
 type Database struct {
@@ -53,6 +60,15 @@ type Database struct {
 // Adapter values. v1 only ships AdapterPostgres; new adapters added later
 // (mysql, mongo, ...) extend this set.
 const AdapterPostgres = "postgres"
+
+// SSL modes for the proxy→upstream leg.
+const (
+	SSLModeDisable = "disable"
+	SSLModeRequire = "require"
+)
+
+// SupportedSSLModes lists every sslmode the validator accepts (kept sorted).
+var SupportedSSLModes = []string{SSLModeDisable, SSLModeRequire}
 
 // SupportedAdapters lists every adapter the validator accepts. Kept sorted
 // for stable error messages.
@@ -196,6 +212,10 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 				return fmt.Errorf("database %q target %q: password is required", d.VirtualName, t.Name)
 			}
 
+			if t.SSLMode != "" && !isSupportedSSLMode(t.SSLMode) {
+				return fmt.Errorf("database %q target %q: unsupported sslmode %q (supported: %v)", d.VirtualName, t.Name, t.SSLMode, SupportedSSLModes)
+			}
+
 			// Plain (no-variable) target.database must still be a valid identifier.
 			if t.Database != "" && len(RequiredVars(t.Database)) == 0 && !ValidIdentifier(t.Database) {
 				return fmt.Errorf("database %q target %q: database %q is not a valid identifier", d.VirtualName, t.Name, t.Database)
@@ -229,6 +249,15 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 func isSupportedAdapter(s string) bool {
 	for _, a := range SupportedAdapters {
 		if a == s {
+			return true
+		}
+	}
+	return false
+}
+
+func isSupportedSSLMode(s string) bool {
+	for _, m := range SupportedSSLModes {
+		if m == s {
 			return true
 		}
 	}

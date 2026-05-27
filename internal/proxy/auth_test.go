@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -40,6 +41,51 @@ func TestAuthenticateUpstream_AuthOk(t *testing.T) {
 
 	if err := <-done; err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAuthenticateUpstream_ErrorResponse(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- AuthenticateUpstream(a, "user", "pass")
+	}()
+
+	body := []byte("SFATAL\x00C28000\x00Mno pg_hba.conf entry, no encryption\x00\x00")
+	if err := WriteMessage(b, 'E', body); err != nil {
+		t.Fatal(err)
+	}
+
+	err := <-done
+	if err == nil || !strings.Contains(err.Error(), "no encryption") || !strings.Contains(err.Error(), "28000") {
+		t.Errorf("expected surfaced upstream error, got %v", err)
+	}
+}
+
+func TestNegotiateUpstreamTLS_ServerDeclines(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := NegotiateUpstreamTLS(a, "example")
+		done <- err
+	}()
+
+	// Drain the 8-byte SSLRequest the client sends, then decline with 'N'.
+	var req [8]byte
+	if _, err := io.ReadFull(b, req[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Write([]byte{'N'}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := <-done
+	if err == nil || !strings.Contains(err.Error(), "does not support SSL") {
+		t.Errorf("expected SSL-unsupported error, got %v", err)
 	}
 }
 

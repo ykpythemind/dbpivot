@@ -24,11 +24,12 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時
 | 対応プロトコル | PostgreSQL のみ |
 | client → proxy 認証 | **trust** (任意 password で受理) |
 | proxy → upstream 認証 | **SCRAM-SHA-256 のみ** (PG 14+ デフォルト) |
-| TLS | 無し (SSLRequest には `N` を返す) |
+| client → proxy TLS | 無し (SSLRequest には `N` を返す) |
+| proxy → upstream TLS | `sslmode: require` で対応 (証明書検証なし)。既定は `disable` |
 | CancelRequest | v1 では捨てる |
 | 切替時の既存接続 | 即時切断 |
 
-MySQL / MongoDB、TLS、MD5/cleartext upstream auth は v1 のスコープ外。
+MySQL / MongoDB、client→proxy TLS、証明書検証あり (`verify-full`)、MD5/cleartext upstream auth は v1 のスコープ外。
 
 ## 設定ファイル
 
@@ -58,6 +59,7 @@ databases:
         database: app_dev                    # 物理 DB 名
       - name: staging
         forward_to: ssm-staging
+        sslmode: require                     # 省略可 (既定 disable)。RDS 等 SSL 必須の upstream 向け
         user: app_staging_user
         password: stg_password
         database: app_${BRANCH}_staging      # use 時に --var BRANCH=... 必須
@@ -94,6 +96,7 @@ databases:
 - 全 database が同じ target 名集合を持つことを推奨。違っていても起動はする (warning) — DB が staging にまだ用意できていない、といった移行途中の状態を許容するため。`use <target>` 時にその target を持たない database は inactive 化される。
 - target は inline (`host` + `port`) か `forward_to` のどちらか一方 (XOR)。
 - `user`, `password` は target ごとに必須。
+- `sslmode` は省略可 (既定 `disable`)。`require` を指定すると upstream へ SSLRequest → TLS ハンドシェイクしてから接続する (証明書検証なし)。RDS など `rds.force_ssl` 有効な upstream に繋ぐ場合に指定する。
 - `virtual_name` と target の `database` は PG 識別子規則 (`^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$`)。
 
 ## 使い方
