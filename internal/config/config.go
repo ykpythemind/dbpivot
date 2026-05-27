@@ -227,11 +227,6 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 			if t.SSLMode != "" && !isSupportedSSLMode(t.SSLMode) {
 				return fmt.Errorf("database %q target %q: unsupported sslmode %q (supported: %v)", d.VirtualName, t.Name, t.SSLMode, SupportedSSLModes)
 			}
-			// MySQL upstream TLS (in-band CLIENT_SSL negotiation) is not yet
-			// implemented; reject require rather than accept an unservable config.
-			if d.Adapter == AdapterMySQL && t.SSLMode == SSLModeRequire {
-				return fmt.Errorf("database %q target %q: sslmode %q is not yet supported for the mysql adapter", d.VirtualName, t.Name, t.SSLMode)
-			}
 
 			// Plain (no-variable) target.database must still be a valid identifier.
 			if t.Database != "" && len(RequiredVars(t.Database)) == 0 && !ValidIdentifier(t.Database) {

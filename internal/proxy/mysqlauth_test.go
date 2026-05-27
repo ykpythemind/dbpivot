@@ -5,8 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
+	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -31,6 +34,10 @@ type fakeServerOpts struct {
 	sha2FullAuth  bool
 	rsaKey        *rsa.PrivateKey
 
+	// serverTLS, when set, advertises CLIENT_SSL in the handshake and upgrades
+	// the link to TLS after the client's SSLRequest, before reading the login.
+	serverTLS *tls.Config
+
 	// captured results for assertions
 	gotResponse   *HandshakeResponse41
 	gotCleartext  string
@@ -42,11 +49,29 @@ func runFakeMySQLServer(t *testing.T, conn net.Conn, o *fakeServerOpts) {
 	t.Helper()
 	defer conn.Close()
 	caps := uint32(ClientProtocol41 | ClientPluginAuth | ClientSecureConnection | ClientConnectWithDB)
+	if o.serverTLS != nil {
+		caps |= ClientSSL
+	}
 	hs := EncodeHandshakeV10("8.0.40-fake", 7, caps, DefaultCharsetUTF8MB4, 0x0002, o.plugin, o.salt)
 	seq, err := WritePacket(conn, 0, hs)
 	if err != nil {
 		t.Errorf("server WritePacket handshake: %v", err)
 		return
+	}
+
+	if o.serverTLS != nil {
+		// Read the short SSLRequest packet, then upgrade to TLS. The full login
+		// arrives encrypted afterward (continuing the same sequence id).
+		if _, _, err := ReadPacket(conn); err != nil {
+			t.Errorf("server read SSLRequest: %v", err)
+			return
+		}
+		tlsConn := tls.Server(conn, o.serverTLS)
+		if err := tlsConn.Handshake(); err != nil {
+			t.Errorf("server TLS handshake: %v", err)
+			return
+		}
+		conn = tlsConn
 	}
 
 	rseq, payload, err := ReadPacket(conn)
@@ -178,7 +203,7 @@ func runAuth(t *testing.T, o *fakeServerOpts, user, password, database string, s
 	}
 	ch := make(chan res, 1)
 	go func() {
-		hs, caps, err := AuthenticateUpstreamMySQL(cConn, user, password, database, secure)
+		_, hs, caps, err := AuthenticateUpstreamMySQL(cConn, user, password, database, secure, nil)
 		ch <- res{hs, caps, err}
 	}()
 	select {
@@ -294,6 +319,120 @@ func TestAuthenticateUpstreamMySQLCachingSHA2FullAuthRSA(t *testing.T) {
 	}
 	if !o.gotRSAOK {
 		t.Errorf("server failed to recover RSA-encrypted password")
+	}
+}
+
+// testTLSConfigs returns a matched server/client TLS config pair backed by a
+// freshly generated self-signed certificate. The client skips verification,
+// mirroring sslmode=require (encrypt, don't authenticate the server).
+func testTLSConfigs(t *testing.T) (server, client *tls.Config) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "dbpivot-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	cert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+	server = &tls.Config{Certificates: []tls.Certificate{cert}}
+	client = &tls.Config{InsecureSkipVerify: true}
+	return server, client
+}
+
+func TestAuthenticateUpstreamMySQLTLS(t *testing.T) {
+	serverTLS, clientTLS := testTLSConfigs(t)
+	o := &fakeServerOpts{
+		plugin:    MySQLNativePassword,
+		salt:      make20Salt(50),
+		password:  "tlspw",
+		serverTLS: serverTLS,
+	}
+	cConn, sConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		runFakeMySQLServer(t, sConn, o)
+		close(done)
+	}()
+
+	type res struct {
+		caps  uint32
+		isTLS bool
+		err   error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		conn, _, caps, err := AuthenticateUpstreamMySQL(cConn, "u", "tlspw", "db", false, clientTLS)
+		_, isTLS := conn.(*tls.Conn)
+		ch <- res{caps, isTLS, err}
+	}()
+
+	select {
+	case r := <-ch:
+		cConn.Close()
+		<-done
+		if r.err != nil {
+			t.Fatalf("tls auth: %v", r.err)
+		}
+		if r.caps&ClientSSL == 0 {
+			t.Errorf("CLIENT_SSL not negotiated: 0x%08x", r.caps)
+		}
+		if !r.isTLS {
+			t.Errorf("returned conn is not *tls.Conn")
+		}
+		if o.gotResponse == nil || o.gotResponse.Username != "u" || o.gotResponse.Database != "db" {
+			t.Errorf("server did not receive login over TLS: %+v", o.gotResponse)
+		}
+		if !verifyNative(o.gotResponse.AuthResponse, o.salt, "tlspw") {
+			t.Errorf("native scramble did not verify over TLS")
+		}
+	case <-time.After(3 * time.Second):
+		cConn.Close()
+		sConn.Close()
+		t.Fatal("tls auth timed out")
+	}
+}
+
+// TestAuthenticateUpstreamMySQLTLSUnsupported verifies the proxy fails (rather
+// than silently downgrading) when sslmode=require but the server lacks CLIENT_SSL.
+func TestAuthenticateUpstreamMySQLTLSUnsupported(t *testing.T) {
+	_, clientTLS := testTLSConfigs(t)
+	cConn, sConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		// Server advertises no CLIENT_SSL and just writes the handshake; the
+		// client should bail before sending any login.
+		defer sConn.Close()
+		caps := uint32(ClientProtocol41 | ClientPluginAuth | ClientSecureConnection)
+		hs := EncodeHandshakeV10("8.0.40-fake", 7, caps, DefaultCharsetUTF8MB4, 0x0002, MySQLNativePassword, make20Salt(60))
+		_, _ = WritePacket(sConn, 0, hs)
+		close(done)
+	}()
+	ch := make(chan error, 1)
+	go func() {
+		_, _, _, err := AuthenticateUpstreamMySQL(cConn, "u", "pw", "db", false, clientTLS)
+		ch <- err
+	}()
+	select {
+	case err := <-ch:
+		cConn.Close()
+		sConn.Close()
+		<-done
+		if err == nil {
+			t.Fatal("expected error when upstream lacks CLIENT_SSL")
+		}
+	case <-time.After(3 * time.Second):
+		cConn.Close()
+		sConn.Close()
+		t.Fatal("timed out")
 	}
 }
 

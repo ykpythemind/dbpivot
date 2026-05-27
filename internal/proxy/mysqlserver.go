@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
+
+	"github.com/ykpythemind/dbpivot/internal/config"
 )
 
 // MySQL connection handler (server-first leg).
@@ -79,15 +82,27 @@ func (s *Server) dispatchMySQL(client net.Conn) error {
 		upDatabase = login.Response.Database
 	}
 
-	// sslmode=require for MySQL is rejected at config-load time (in-band
-	// CLIENT_SSL is not yet implemented), so the upstream leg is plaintext.
-	_, upCaps, err := AuthenticateUpstreamMySQL(up, rt.User, rt.Password, upDatabase, false)
+	// sslmode=require negotiates in-band TLS to the upstream (CLIENT_SSL),
+	// encrypting the link without verifying the server certificate — matching
+	// the PostgreSQL path's sslmode=require semantics. Otherwise the leg is
+	// plaintext.
+	var tlsConfig *tls.Config
+	if rt.SSLMode == config.SSLModeRequire {
+		tlsConfig = &tls.Config{
+			ServerName:         rt.Host,
+			InsecureSkipVerify: true, // sslmode=require: encrypt, don't verify
+		}
+	}
+
+	upConn, _, upCaps, err := AuthenticateUpstreamMySQL(up, rt.User, rt.Password, upDatabase, false, tlsConfig)
 	if err != nil {
 		_ = writeMySQLErr(client, login.NextSeq, erAccessDenied, "28000", fmt.Sprintf("upstream auth failed: %v", err))
 		up.Close()
 		s.logger.Error("upstream auth", "virtual_name", database.VirtualName(), "err", err)
 		return err
 	}
+	// After a successful login, pipe over the (possibly TLS-wrapped) conn.
+	up = upConn
 
 	// Capability symmetry: after login the command phase is piped RAW, so the
 	// result-set framing the client expects must match what the upstream emits.

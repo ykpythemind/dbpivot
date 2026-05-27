@@ -350,6 +350,20 @@ func EncodeHandshakeResponse41(capabilities uint32, charset byte, username strin
 	return b
 }
 
+// EncodeSSLRequest builds the short SSLRequest packet a client sends before a
+// TLS upgrade: it is exactly the 32-byte fixed header of HandshakeResponse41
+// (capabilities — which must include CLIENT_SSL — max packet size, charset, and
+// 23 reserved bytes) with no username/auth payload. After the server reads this
+// and the TLS handshake completes, the full HandshakeResponse41 follows
+// encrypted, continuing the same sequence id counter.
+func EncodeSSLRequest(capabilities uint32, charset byte) []byte {
+	b := binary.LittleEndian.AppendUint32(nil, capabilities)
+	b = binary.LittleEndian.AppendUint32(b, MaxPacketPayload)
+	b = append(b, charset)
+	b = append(b, make([]byte, 23)...) // reserved
+	return b
+}
+
 // --- handshake response 41 (client -> server) ---
 
 // HandshakeResponse41 is the parsed client login packet.

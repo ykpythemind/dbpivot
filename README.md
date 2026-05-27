@@ -1,6 +1,6 @@
 # dbpivot
 
-ローカル開発時に「同じアプリから接続する DB を、ローカル ⇄ リモートで瞬時に切り替えたい」需要に応えるための、PostgreSQL 専用のローカルプロキシ。
+ローカル開発時に「同じアプリから接続する DB を、ローカル ⇄ リモートで瞬時に切り替えたい」需要に応えるための、PostgreSQL / MySQL 対応のローカルプロキシ。
 
 アプリの接続文字列を書き換えずに、CLI 一発で接続先を切り替えられる。
 
@@ -21,15 +21,16 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時
 
 | | |
 |---|---|
-| 対応プロトコル | PostgreSQL のみ |
+| 対応プロトコル | PostgreSQL / MySQL (1 インスタンス 1 プロトコル。全 database で同じ `adapter` を共有) |
 | client → proxy 認証 | **trust** (任意 password で受理) |
-| proxy → upstream 認証 | **SCRAM-SHA-256 のみ** (PG 14+ デフォルト) |
-| client → proxy TLS | 無し (SSLRequest には `N` を返す) |
-| proxy → upstream TLS | `sslmode: require` で対応 (証明書検証なし)。既定は `disable` |
+| proxy → upstream 認証 (PostgreSQL) | **SCRAM-SHA-256 のみ** (PG 14+ デフォルト) |
+| proxy → upstream 認証 (MySQL) | `mysql_native_password` / `caching_sha2_password` (fast-auth・TLS 経由 cleartext・RSA full-auth) |
+| client → proxy TLS | 無し (PG は SSLRequest に `N`、MySQL は greeting で CLIENT_SSL を出さない) |
+| proxy → upstream TLS | `sslmode: require` で対応 (PG=SSLRequest, MySQL=in-band CLIENT_SSL。いずれも証明書検証なし)。既定は `disable` |
 | CancelRequest | v1 では捨てる |
 | 切替時の既存接続 | 即時切断 |
 
-MySQL / MongoDB、client→proxy TLS、証明書検証あり (`verify-full`)、MD5/cleartext upstream auth は v1 のスコープ外。
+MongoDB、client→proxy TLS、証明書検証あり (`verify-full`)、PG の MD5/cleartext upstream auth は v1 のスコープ外。MySQL は 1 ポート内で PostgreSQL と混在させられない (config で全 database が同じ `adapter` を持つことを強制)。
 
 ## 設定ファイル
 
@@ -48,7 +49,7 @@ forward_targets:                             # 省略可。inline 派なら不�
     port: 15433
 
 databases:
-  - adapter: postgres                        # 必須。v1 では `postgres` のみサポート
+  - adapter: postgres                        # 必須。`postgres` / `mysql` をサポート (全 database で統一)
     virtual_name: appdb                      # アプリは dbname=appdb で接続 (= 論理名)
     targets:
       - name: local                          # target 名は全 database で共通推奨
@@ -92,11 +93,11 @@ databases:
 
 ### バリデーション要点
 
-- 各 database には `adapter` が必須。v1 でサポートされるのは `postgres` のみ。
+- 各 database には `adapter` が必須。サポートされるのは `postgres` / `mysql`。1 ポートは 1 プロトコルなので、全 database が同じ `adapter` を持つ必要がある (混在は起動時にエラー)。
 - 全 database が同じ target 名集合を持つことを推奨。違っていても起動はする (warning) — DB が staging にまだ用意できていない、といった移行途中の状態を許容するため。`use <target>` 時にその target を持たない database は inactive 化される。
 - target は inline (`host` + `port`) か `forward_to` のどちらか一方 (XOR)。
 - `user`, `password` は target ごとに必須。
-- `sslmode` は省略可 (既定 `disable`)。`require` を指定すると upstream へ SSLRequest → TLS ハンドシェイクしてから接続する (証明書検証なし)。RDS など `rds.force_ssl` 有効な upstream に繋ぐ場合に指定する。
+- `sslmode` は省略可 (既定 `disable`)。`require` を指定すると upstream へ TLS ハンドシェイクしてから接続する (証明書検証なし。PostgreSQL は SSLRequest、MySQL は in-band の CLIENT_SSL ネゴシエーション)。RDS など SSL 必須の upstream に繋ぐ場合に指定する。
 - `virtual_name` と target の `database` は PG 識別子規則 (`^[A-Za-z0-9_][A-Za-z0-9_$-]{0,62}$`)。
 
 ## 使い方

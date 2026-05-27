@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"sync/atomic"
@@ -20,6 +21,10 @@ type fakeMySQLUpstream struct {
 	ln   net.Listener
 	port int
 	last atomic.Value // *HandshakeResponse41
+
+	// tlsConfig, when set, makes the upstream advertise CLIENT_SSL and upgrade
+	// the link to TLS after the proxy's SSLRequest (sslmode=require path).
+	tlsConfig *tls.Config
 }
 
 func newFakeMySQLUpstream(t *testing.T) *fakeMySQLUpstream {
@@ -29,6 +34,18 @@ func newFakeMySQLUpstream(t *testing.T) *fakeMySQLUpstream {
 		t.Fatal(err)
 	}
 	fu := &fakeMySQLUpstream{t: t, ln: ln, port: ln.Addr().(*net.TCPAddr).Port}
+	go fu.acceptLoop()
+	return fu
+}
+
+func newFakeMySQLUpstreamTLS(t *testing.T) *fakeMySQLUpstream {
+	t.Helper()
+	serverTLS, _ := testTLSConfigs(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fu := &fakeMySQLUpstream{t: t, ln: ln, port: ln.Addr().(*net.TCPAddr).Port, tlsConfig: serverTLS}
 	go fu.acceptLoop()
 	return fu
 }
@@ -48,9 +65,23 @@ func (fu *fakeMySQLUpstream) serve(c net.Conn) {
 	caps := uint32(ClientProtocol41 | ClientPluginAuth | ClientSecureConnection |
 		ClientConnectWithDB | ClientDeprecateEOF)
 	salt := make20Salt(7)
+	if fu.tlsConfig != nil {
+		caps |= ClientSSL
+	}
 	hs := EncodeHandshakeV10("8.0.40-fake", 11, caps, DefaultCharsetUTF8MB4, 0x0002, MySQLNativePassword, salt)
 	if _, err := WritePacket(c, 0, hs); err != nil {
 		return
+	}
+	if fu.tlsConfig != nil {
+		// Read the SSLRequest, upgrade to TLS, then read the login encrypted.
+		if _, _, err := ReadPacket(c); err != nil {
+			return
+		}
+		tlsConn := tls.Server(c, fu.tlsConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			return
+		}
+		c = tlsConn
 	}
 	rseq, payload, err := ReadPacket(c)
 	if err != nil {
@@ -189,6 +220,50 @@ func TestServerMySQL_UnknownDatabaseReturnsErr(t *testing.T) {
 	defer c.Close()
 	if !IsErrPacket(concluding) {
 		t.Fatalf("expected ERR, got header 0x%02x", firstByte(concluding))
+	}
+}
+
+func TestServerMySQL_UpstreamTLS(t *testing.T) {
+	up := newFakeMySQLUpstreamTLS(t)
+	defer up.close()
+
+	cfg := mysqlCfg(t, config.Target{
+		Name: "local", Host: "127.0.0.1", Port: up.port,
+		User: "alice", Password: "secret", Database: "app_real",
+		SSLMode: config.SSLModeRequire,
+	})
+	s := startServer(t, cfg)
+	defer s.Shutdown(context.Background())
+
+	c, concluding := mysqlClientLogin(t, s.Addr(), "anyone", "whatever", "appdb")
+	defer c.Close()
+	if !IsOKPacket(concluding) {
+		t.Fatalf("expected OK, got header 0x%02x (%s)", firstByte(concluding), ParseERRPacket(concluding))
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	login := up.lastLogin()
+	if login == nil {
+		t.Fatal("upstream never received a login over TLS")
+	}
+	if login.Username != "alice" || login.Database != "app_real" {
+		t.Errorf("upstream login over TLS = user %q db %q, want alice/app_real", login.Username, login.Database)
+	}
+	if login.Capabilities&ClientSSL == 0 {
+		t.Errorf("upstream login did not carry CLIENT_SSL: 0x%08x", login.Capabilities)
+	}
+
+	// Command phase still pipes correctly over the encrypted upstream leg.
+	msg := []byte("SELECT 1\n")
+	if _, err := c.Write(msg); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(c, buf); err != nil {
+		t.Fatalf("read echo over TLS-backed pipe: %v", err)
+	}
+	if string(buf) != string(msg) {
+		t.Errorf("echo = %q, want %q", buf, msg)
 	}
 }
 

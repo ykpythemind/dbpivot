@@ -5,10 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 )
 
 // MySQL upstream authentication driver.
@@ -71,24 +73,33 @@ func mysqlAuthResponse(plugin, password string, salt []byte) ([]byte, error) {
 	}
 }
 
-// AuthenticateUpstreamMySQL reads the upstream's initial handshake, logs in
-// with user/password/database, and drives any auth-switch / caching_sha2
-// follow-ups to completion. secure reports whether conn is already encrypted
-// (TLS), which decides how caching_sha2 full-auth sends the password.
+// AuthenticateUpstreamMySQL reads the upstream's initial handshake, optionally
+// upgrades the link to TLS, logs in with user/password/database, and drives any
+// auth-switch / caching_sha2 follow-ups to completion.
 //
-// It returns the parsed handshake and the capability flags the proxy
-// negotiated with the upstream, so the caller can keep both legs consistent.
-func AuthenticateUpstreamMySQL(conn io.ReadWriter, user, password, database string, secure bool) (*HandshakeV10, uint32, error) {
+// secure reports whether conn is already encrypted before this call (which
+// decides how caching_sha2 full-auth sends the password). tlsConfig, when
+// non-nil, requests an in-band TLS upgrade: the proxy sends a short SSLRequest
+// after reading the server handshake, performs the TLS handshake, then sends
+// the rest of the login encrypted — the MySQL analog of sslmode=require. If the
+// upstream does not advertise CLIENT_SSL the call fails rather than fall back
+// to plaintext.
+//
+// It returns the connection to use for the command phase (the TLS-wrapped conn
+// when an upgrade happened, otherwise conn unchanged), the parsed handshake,
+// and the capability flags the proxy negotiated with the upstream, so the
+// caller can keep both legs consistent.
+func AuthenticateUpstreamMySQL(conn net.Conn, user, password, database string, secure bool, tlsConfig *tls.Config) (net.Conn, *HandshakeV10, uint32, error) {
 	seq, payload, err := ReadPacket(conn)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read handshake: %w", err)
+		return nil, nil, 0, fmt.Errorf("read handshake: %w", err)
 	}
 	if IsErrPacket(payload) {
-		return nil, 0, fmt.Errorf("upstream rejected connection: %s", ParseERRPacket(payload))
+		return nil, nil, 0, fmt.Errorf("upstream rejected connection: %s", ParseERRPacket(payload))
 	}
 	hs, err := ParseHandshakeV10(payload)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 
 	plugin := hs.AuthPluginName
@@ -97,21 +108,42 @@ func AuthenticateUpstreamMySQL(conn io.ReadWriter, user, password, database stri
 	}
 	caps := mysqlUpstreamCaps(hs.Capabilities, database != "")
 
+	// In-band TLS negotiation (sslmode=require). The SSLRequest packet reuses
+	// the handshake's sequence id (server handshake = seq 0, SSLRequest = seq
+	// 1), and the encrypted HandshakeResponse41 continues from there.
+	if tlsConfig != nil {
+		if hs.Capabilities&ClientSSL == 0 {
+			return nil, nil, 0, fmt.Errorf("upstream does not support TLS but sslmode=require")
+		}
+		caps |= ClientSSL
+		seq++
+		if seq, err = WritePacket(conn, seq, EncodeSSLRequest(caps, DefaultCharsetUTF8MB4)); err != nil {
+			return nil, nil, 0, fmt.Errorf("write SSLRequest: %w", err)
+		}
+		tlsConn := tls.Client(conn, tlsConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			return nil, nil, 0, fmt.Errorf("upstream TLS handshake: %w", err)
+		}
+		conn = tlsConn
+		secure = true
+	} else {
+		seq++
+	}
+
 	authResp, err := mysqlAuthResponse(plugin, password, hs.AuthPluginData)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 
 	resp := EncodeHandshakeResponse41(caps, DefaultCharsetUTF8MB4, user, authResp, database, plugin)
-	seq++
 	if seq, err = WritePacket(conn, seq, resp); err != nil {
-		return nil, 0, fmt.Errorf("write handshake response: %w", err)
+		return nil, nil, 0, fmt.Errorf("write handshake response: %w", err)
 	}
 
 	if err := mysqlFinishAuth(conn, seq, plugin, password, hs.AuthPluginData, secure); err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
-	return hs, caps, nil
+	return conn, hs, caps, nil
 }
 
 // mysqlFinishAuth consumes server packets after the HandshakeResponse41 until
