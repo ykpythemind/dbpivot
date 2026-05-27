@@ -20,6 +20,9 @@ func AuthenticateUpstream(conn net.Conn, user, password string) error {
 		return fmt.Errorf("read auth message: %w", err)
 	}
 	if typ != 'R' {
+		if typ == 'E' {
+			return fmt.Errorf("upstream rejected connection: %s", ParseErrorResponse(body))
+		}
 		return fmt.Errorf("expected Authentication message (R), got %c", typ)
 	}
 	code, data, err := ParseAuthenticationMessage(body)
