@@ -7,6 +7,22 @@ import (
 	"testing"
 )
 
+func TestParseErrorResponse(t *testing.T) {
+	// Field order: type byte + NUL-terminated value, terminated by a zero byte.
+	body := []byte("SFATAL\x00C28000\x00Mno pg_hba.conf entry for host \"x\", no encryption\x00\x00")
+	got := ParseErrorResponse(body)
+	want := `FATAL: no pg_hba.conf entry for host "x", no encryption (SQLSTATE 28000)`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestParseErrorResponse_Empty(t *testing.T) {
+	if got := ParseErrorResponse([]byte{0}); got != "unparseable ErrorResponse" {
+		t.Errorf("got %q", got)
+	}
+}
+
 func TestParseStartupBody_OK(t *testing.T) {
 	body := []byte("user\x00alice\x00database\x00app\x00\x00")
 	got, err := ParseStartupBody(body)

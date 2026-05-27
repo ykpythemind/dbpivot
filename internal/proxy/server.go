@@ -360,6 +360,17 @@ func (s *Server) handleStartup(client net.Conn, br *bufio.Reader, msgLen int) er
 		return err
 	}
 
+	if rt.SSLMode == config.SSLModeRequire {
+		tlsConn, err := NegotiateUpstreamTLS(up, rt.Host)
+		if err != nil {
+			_ = WriteErrorResponse(client, "FATAL", "08006", fmt.Sprintf("upstream TLS failed: %v", err))
+			up.Close()
+			s.logger.Error("upstream tls", "virtual_name", database.VirtualName(), "err", err)
+			return err
+		}
+		up = tlsConn
+	}
+
 	if _, err := up.Write(upStartup); err != nil {
 		_ = WriteErrorResponse(client, "FATAL", "08006", "upstream write failed")
 		up.Close()

@@ -1,11 +1,46 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 
 	"github.com/xdg-go/scram"
 )
+
+// NegotiateUpstreamTLS performs the PostgreSQL SSLRequest handshake on a freshly
+// dialed upstream connection and, if the server agrees ('S'), upgrades it to
+// TLS. This must happen before the StartupMessage is sent.
+//
+// serverName is used for SNI only; the certificate chain is NOT verified
+// (sslmode=require semantics: encrypt the link, don't authenticate the server).
+// If the server declines TLS ('N') the call fails, because the caller asked for
+// it explicitly.
+func NegotiateUpstreamTLS(conn net.Conn, serverName string) (net.Conn, error) {
+	if err := SendSSLRequest(conn); err != nil {
+		return nil, fmt.Errorf("send SSLRequest: %w", err)
+	}
+	var resp [1]byte
+	if _, err := io.ReadFull(conn, resp[:]); err != nil {
+		return nil, fmt.Errorf("read SSLRequest response: %w", err)
+	}
+	switch resp[0] {
+	case 'S':
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName:         serverName,
+			InsecureSkipVerify: true, // sslmode=require: encrypt, don't verify
+		})
+		if err := tlsConn.Handshake(); err != nil {
+			return nil, fmt.Errorf("upstream TLS handshake: %w", err)
+		}
+		return tlsConn, nil
+	case 'N':
+		return nil, fmt.Errorf("upstream does not support SSL but sslmode=require")
+	default:
+		return nil, fmt.Errorf("unexpected SSLRequest response byte %q", resp[0])
+	}
+}
 
 // AuthenticateUpstream completes the upstream-side SCRAM-SHA-256 exchange
 // using user/password. It expects to start reading right after a
@@ -20,6 +55,9 @@ func AuthenticateUpstream(conn net.Conn, user, password string) error {
 		return fmt.Errorf("read auth message: %w", err)
 	}
 	if typ != 'R' {
+		if typ == 'E' {
+			return fmt.Errorf("upstream rejected connection: %s", ParseErrorResponse(body))
+		}
 		return fmt.Errorf("expected Authentication message (R), got %c", typ)
 	}
 	code, data, err := ParseAuthenticationMessage(body)

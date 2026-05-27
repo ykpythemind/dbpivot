@@ -18,6 +18,7 @@ type ResolvedTarget struct {
 	User     string
 	Password string
 	Database string
+	SSLMode  string
 }
 
 // Conn is a registered (client, upstream) pair guarded by a once-only close.
@@ -122,6 +123,7 @@ func (d *Database) ResolveTarget(name string, vars map[string]string) (ResolvedT
 		User:     t.User,
 		Password: t.Password,
 		Database: resolvedDB,
+		SSLMode:  t.SSLMode,
 	}, nil, nil
 }
 

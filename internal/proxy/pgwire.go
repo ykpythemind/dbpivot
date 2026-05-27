@@ -215,6 +215,48 @@ func WriteErrorResponse(w io.Writer, severity, sqlstate, message string) error {
 	return WriteMessage(w, 'E', body)
 }
 
+// ParseErrorResponse decodes the body of an ErrorResponse ('E') into a short
+// human-readable string. The body is a sequence of fields, each a single type
+// byte followed by a NUL-terminated value, ending with a zero byte. We surface
+// the severity (S), SQLSTATE (C), and message (M) fields.
+func ParseErrorResponse(body []byte) string {
+	var severity, code, message string
+	start := 0
+	for start < len(body) {
+		ftype := body[start]
+		if ftype == 0 {
+			break
+		}
+		end := start + 1
+		for end < len(body) && body[end] != 0 {
+			end++
+		}
+		val := string(body[start+1 : end])
+		switch ftype {
+		case 'S', 'V':
+			if severity == "" {
+				severity = val
+			}
+		case 'C':
+			code = val
+		case 'M':
+			message = val
+		}
+		start = end + 1
+	}
+	parts := message
+	if severity != "" {
+		parts = severity + ": " + parts
+	}
+	if code != "" {
+		parts = parts + " (SQLSTATE " + code + ")"
+	}
+	if parts == "" {
+		return "unparseable ErrorResponse"
+	}
+	return parts
+}
+
 // ReadUint32 reads a single big-endian 4-byte unsigned int.
 func ReadUint32(r io.Reader) (uint32, error) {
 	var b [4]byte

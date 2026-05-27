@@ -32,6 +32,14 @@ func TestValidate_Ok(t *testing.T) {
 	}
 }
 
+func TestValidate_SSLModeRequireOK(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Databases[0].Targets[1].SSLMode = SSLModeRequire
+	if err := Validate(cfg, nil); err != nil {
+		t.Fatalf("sslmode=require should be valid: %v", err)
+	}
+}
+
 func TestValidate_Errors(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -72,6 +80,9 @@ func TestValidate_Errors(t *testing.T) {
 		{"forward_target_no_host", func(c *Config) {
 			c.ForwardTargets["x"] = ForwardTarget{Host: "", Port: 1}
 		}, "host is empty"},
+		{"sslmode_unsupported", func(c *Config) {
+			c.Databases[0].Targets[1].SSLMode = "verify-full"
+		}, "unsupported sslmode"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
