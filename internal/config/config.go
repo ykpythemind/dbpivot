@@ -78,15 +78,32 @@ var SupportedSSLModes = []string{SSLModeDisable, SSLModeRequire}
 var SupportedAdapters = []string{AdapterMySQL, AdapterPostgres}
 
 type Config struct {
+	// ListenHost is the bind interface for every listen port (defaults to
+	// 127.0.0.1). Set to "0.0.0.0" — or a specific LAN / bridge address — to
+	// expose the proxy beyond the local machine; the default keeps the proxy
+	// reachable only from this host.
+	ListenHost string `yaml:"listen_host,omitempty"`
+
 	// ListenPorts maps an adapter name to the TCP port the proxy listens on
-	// for that protocol (127.0.0.1 only). One dbpivot instance can serve
-	// several adapters at once, each on its own port; a database's adapter
-	// selects which port its clients connect to. Every adapter used by a
-	// database must have an entry here.
+	// for that protocol. One dbpivot instance can serve several adapters at
+	// once, each on its own port; a database's adapter selects which port its
+	// clients connect to. Every adapter used by a database must have an entry
+	// here.
 	ListenPorts    map[string]int           `yaml:"listen_ports"`
 	ControlSocket  string                   `yaml:"control_socket"`
 	ForwardTargets map[string]ForwardTarget `yaml:"forward_targets,omitempty"`
 	Databases      []Database               `yaml:"databases"`
+}
+
+// DefaultListenHost is the bind address used when listen_host is unset.
+const DefaultListenHost = "127.0.0.1"
+
+// ListenHostOrDefault returns ListenHost if set, otherwise DefaultListenHost.
+func (cfg *Config) ListenHostOrDefault() string {
+	if cfg.ListenHost == "" {
+		return DefaultListenHost
+	}
+	return cfg.ListenHost
 }
 
 // ListenPort returns the configured listen port for adapter, if any.
@@ -159,6 +176,14 @@ func Load(path string, logger *slog.Logger) (*Config, error) {
 func Validate(cfg *Config, logger *slog.Logger) error {
 	if len(cfg.ListenPorts) == 0 {
 		return fmt.Errorf("listen_ports must define at least one adapter port")
+	}
+	// client→proxy auth is trust (any password accepted), so binding beyond
+	// loopback exposes every configured upstream to anyone who can reach the
+	// listen interface. Warn loudly when that happens; the operator may still
+	// want it (containers reaching a host-side proxy, shared dev env, etc.).
+	if logger != nil && cfg.ListenHost != "" && cfg.ListenHost != DefaultListenHost && cfg.ListenHost != "localhost" {
+		logger.Warn("listen_host is not loopback; client→proxy auth is trust, so the proxy will accept any password from anyone who can reach this address",
+			"listen_host", cfg.ListenHost)
 	}
 	seenPorts := make(map[int]string, len(cfg.ListenPorts))
 	for adapter, port := range cfg.ListenPorts {

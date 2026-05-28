@@ -74,13 +74,14 @@ func New(cfg *config.Config, target string, vars map[string]string, logger *slog
 	}
 	// Bind one listener per adapter a database actually uses. Validate has
 	// already guaranteed every such adapter has a listen_ports entry.
+	listenHost := cfg.ListenHostOrDefault()
 	listenAddrs := make(map[string]string)
 	for _, adapter := range cfg.UsedAdapters() {
 		port, ok := cfg.ListenPort(adapter)
 		if !ok {
 			return nil, fmt.Errorf("adapter %q has no listen_ports entry", adapter)
 		}
-		listenAddrs[adapter] = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		listenAddrs[adapter] = net.JoinHostPort(listenHost, strconv.Itoa(port))
 	}
 	s := &Server{
 		listenAddrs: listenAddrs,

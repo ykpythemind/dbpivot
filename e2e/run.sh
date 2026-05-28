@@ -195,6 +195,11 @@ go build -o "$WORK/e2eserver" ./e2e/server
 # capability the multi-port refactor enabled. PG clients hit DBPIVOT_PORT,
 # MySQL clients hit DBPIVOT_MYSQL_PORT; `use <target>` flips both at once.
 cat > "$WORK/dbpivot.yml" <<EOF
+# Bind on all interfaces so the sidecar mysql container can reach the proxy
+# across both Linux (host.docker.internal == bridge gateway IP) and macOS
+# Docker Desktop (host.docker.internal == host loopback). Production should
+# keep the default 127.0.0.1.
+listen_host: 0.0.0.0
 listen_ports:
   postgres: $DBPIVOT_PORT
   mysql: $DBPIVOT_MYSQL_PORT

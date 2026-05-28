@@ -37,7 +37,8 @@ MongoDB、client→proxy TLS、証明書検証あり (`verify-full`)、PG の MD
 カレントディレクトリの `.dbpivot.yml` を既定で読む (任意のパスにしたい場合は `--config PATH`)。
 
 ```yaml
-listen_ports:                                # adapter ごとの listen port (127.0.0.1)。使う adapter の分だけ書く
+listen_host: 127.0.0.1                       # 省略可 (既定 127.0.0.1)。docker container 等から proxy へ届かせたい場合は 0.0.0.0
+listen_ports:                                # adapter ごとの listen port。使う adapter の分だけ書く
   postgres: 6432                             # postgres の database が接続するポート
   mysql: 3306                                # mysql の database が接続するポート (mysql を使わないなら省略可)
 control_socket: /tmp/dbpivot.sock            # 省略可
