@@ -150,8 +150,13 @@ func startDaemon(t *testing.T, cfg *config.Config, initialTarget string, vars ma
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	cfg.ControlSocket = shortSocketPath(t)
-	if cfg.Port == 0 {
-		cfg.Port = freePort(t)
+	if cfg.ListenPorts == nil {
+		cfg.ListenPorts = map[string]int{}
+	}
+	for _, adapter := range cfg.UsedAdapters() {
+		if cfg.ListenPorts[adapter] == 0 {
+			cfg.ListenPorts[adapter] = freePort(t)
+		}
 	}
 
 	srv, err := proxy.New(cfg, initialTarget, vars, logger)
@@ -167,18 +172,30 @@ func startDaemon(t *testing.T, cfg *config.Config, initialTarget string, vars ma
 	go srv.Start()
 	go cs.Serve()
 
-	// Wait for the TCP listener to be ready.
+	// Wait for every adapter's TCP listener to be ready.
 	deadline := time.Now().Add(3 * time.Second)
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Port))
 	for time.Now().Before(deadline) {
-		c, err := net.Dial("tcp", addr)
-		if err == nil {
+		ready := true
+		for _, a := range srv.Addrs() {
+			c, err := net.Dial("tcp", a)
+			if err != nil {
+				ready = false
+				break
+			}
 			c.Close()
+		}
+		if ready {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
+	// These integration configs use a single adapter, so Addr is the sole
+	// served address; AddrFor exposes per-adapter lookups for mixed configs.
+	addr := ""
+	for _, a := range srv.Addrs() {
+		addr = a
+	}
 	d := &integrationDaemon{
 		Server:  srv,
 		Control: cs,

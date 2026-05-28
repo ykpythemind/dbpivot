@@ -55,7 +55,7 @@ func (s *Server) dispatchMySQL(client net.Conn) error {
 		dbname = login.Response.Username
 	}
 
-	database := s.lookupDatabase(dbname)
+	database := s.lookupDatabase(config.AdapterMySQL, dbname)
 	if database == nil {
 		_ = writeMySQLErr(client, login.NextSeq, erBadDBError, "42000", fmt.Sprintf("Unknown database '%s'", dbname))
 		s.logger.Info("unknown database", "dbname", dbname, "remote", client.RemoteAddr())

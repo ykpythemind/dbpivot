@@ -146,7 +146,7 @@ func mysqlClientLogin(t *testing.T, addr, user, password, database string) (net.
 
 func mysqlCfg(t *testing.T, target config.Target) *config.Config {
 	return &config.Config{
-		Port: freePort(t),
+		ListenPorts: map[string]int{config.AdapterMySQL: freePort(t)},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterMySQL,
@@ -168,7 +168,7 @@ func TestServerMySQL_RouteAndRewriteDatabase(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, concluding := mysqlClientLogin(t, s.Addr(), "anyone", "whatever", "appdb")
+	c, concluding := mysqlClientLogin(t, s.AddrFor(config.AdapterMySQL), "anyone", "whatever", "appdb")
 	defer c.Close()
 	if !IsOKPacket(concluding) {
 		t.Fatalf("expected OK, got header 0x%02x (%s)", firstByte(concluding), ParseERRPacket(concluding))
@@ -197,7 +197,7 @@ func TestServerMySQL_EmptyDatabasePassthrough(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, concluding := mysqlClientLogin(t, s.Addr(), "anyone", "", "appdb")
+	c, concluding := mysqlClientLogin(t, s.AddrFor(config.AdapterMySQL), "anyone", "", "appdb")
 	defer c.Close()
 	if !IsOKPacket(concluding) {
 		t.Fatalf("expected OK, got %s", ParseERRPacket(concluding))
@@ -216,7 +216,7 @@ func TestServerMySQL_UnknownDatabaseReturnsErr(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, concluding := mysqlClientLogin(t, s.Addr(), "u", "p", "missing")
+	c, concluding := mysqlClientLogin(t, s.AddrFor(config.AdapterMySQL), "u", "p", "missing")
 	defer c.Close()
 	if !IsErrPacket(concluding) {
 		t.Fatalf("expected ERR, got header 0x%02x", firstByte(concluding))
@@ -235,7 +235,7 @@ func TestServerMySQL_UpstreamTLS(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, concluding := mysqlClientLogin(t, s.Addr(), "anyone", "whatever", "appdb")
+	c, concluding := mysqlClientLogin(t, s.AddrFor(config.AdapterMySQL), "anyone", "whatever", "appdb")
 	defer c.Close()
 	if !IsOKPacket(concluding) {
 		t.Fatalf("expected OK, got header 0x%02x (%s)", firstByte(concluding), ParseERRPacket(concluding))
@@ -278,7 +278,7 @@ func TestServerMySQL_BidiPipeAfterAuth(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, concluding := mysqlClientLogin(t, s.Addr(), "anyone", "pw", "appdb")
+	c, concluding := mysqlClientLogin(t, s.AddrFor(config.AdapterMySQL), "anyone", "pw", "appdb")
 	defer c.Close()
 	if !IsOKPacket(concluding) {
 		t.Fatalf("expected OK, got %s", ParseERRPacket(concluding))
@@ -294,5 +294,73 @@ func TestServerMySQL_BidiPipeAfterAuth(t *testing.T) {
 	}
 	if string(buf) != string(msg) {
 		t.Errorf("echo = %q, want %q", buf, msg)
+	}
+}
+
+// TestServer_MixedAdapters brings up one Server serving both a PostgreSQL and a
+// MySQL database on separate listen ports, and verifies that each port routes
+// only to its own adapter's database — a PG client on the postgres port reaches
+// the PG database, a MySQL client on the mysql port reaches the MySQL database,
+// and a MySQL client asking for the PG database's name is rejected (no
+// cross-adapter routing).
+func TestServer_MixedAdapters(t *testing.T) {
+	pg := newFakeUpstream(t, "alice", "secret")
+	defer pg.close()
+	my := newFakeMySQLUpstream(t)
+	defer my.close()
+
+	cfg := &config.Config{
+		ListenPorts: map[string]int{
+			config.AdapterPostgres: freePort(t),
+			config.AdapterMySQL:    freePort(t),
+		},
+		Databases: []config.Database{
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "pgdb",
+				Targets:     []config.Target{{Name: "local", Host: "127.0.0.1", Port: pg.port, User: "alice", Password: "secret", Database: "app_real"}},
+			},
+			{
+				Adapter:     config.AdapterMySQL,
+				VirtualName: "mydb",
+				Targets:     []config.Target{{Name: "local", Host: "127.0.0.1", Port: my.port, User: "alice", Password: "secret", Database: "app_real"}},
+			},
+		},
+	}
+	s := startServer(t, cfg)
+	defer s.Shutdown(context.Background())
+
+	// PG client on the postgres port reaches pgdb.
+	pc, err := net.Dial("tcp", s.AddrFor(config.AdapterPostgres))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	if err := SendStartupMessage(pc, []KV{{K: "user", V: "anyone"}, {K: "database", V: "pgdb"}}); err != nil {
+		t.Fatal(err)
+	}
+	typ, body, err := ReadMessage(pc)
+	if err != nil {
+		t.Fatalf("read AuthOk: %v", err)
+	}
+	if typ != 'R' {
+		t.Fatalf("pg typ = %c, want R", typ)
+	}
+	if code, _, _ := ParseAuthenticationMessage(body); code != AuthOk {
+		t.Fatalf("pg auth code = %d, want AuthOk", code)
+	}
+
+	// MySQL client on the mysql port reaches mydb.
+	mc, concluding := mysqlClientLogin(t, s.AddrFor(config.AdapterMySQL), "anyone", "whatever", "mydb")
+	defer mc.Close()
+	if !IsOKPacket(concluding) {
+		t.Fatalf("mysql expected OK, got %s", ParseERRPacket(concluding))
+	}
+
+	// Cross-adapter routing is rejected: the MySQL port does not see pgdb.
+	xc, xconcluding := mysqlClientLogin(t, s.AddrFor(config.AdapterMySQL), "anyone", "whatever", "pgdb")
+	defer xc.Close()
+	if !IsErrPacket(xconcluding) {
+		t.Fatalf("mysql port should not route to pg database; got header 0x%02x", firstByte(xconcluding))
 	}
 }

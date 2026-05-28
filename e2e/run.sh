@@ -98,7 +98,8 @@ cd "$ROOT"
 go build -o "$WORK/dbpivot" ./cmd/dbpivot
 
 cat > "$WORK/dbpivot.yml" <<EOF
-port: $DBPIVOT_PORT
+listen_ports:
+  postgres: $DBPIVOT_PORT
 control_socket: $WORK/dbpivot.sock
 
 databases:

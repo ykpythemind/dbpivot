@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -217,15 +218,24 @@ func renderStatus(resp *control.Response) error {
 		fmt.Fprintln(os.Stderr, "error:", resp.Error)
 		os.Exit(1)
 	}
-	fmt.Printf("listening on 127.0.0.1:%d  current target: %s\n", resp.Port, resp.CurrentTarget)
+	adapters := make([]string, 0, len(resp.Ports))
+	for a := range resp.Ports {
+		adapters = append(adapters, a)
+	}
+	sort.Strings(adapters)
+	parts := make([]string, len(adapters))
+	for i, a := range adapters {
+		parts[i] = fmt.Sprintf("%s=127.0.0.1:%d", a, resp.Ports[a])
+	}
+	fmt.Printf("listening %s  current target: %s\n", strings.Join(parts, " "), resp.CurrentTarget)
 	for _, d := range resp.Databases {
 		if d.Inactive {
-			fmt.Printf("  %s -> INACTIVE (no target %q declared; active=%d)\n",
-				d.VirtualName, resp.CurrentTarget, d.ActiveConns)
+			fmt.Printf("  %s [%s] -> INACTIVE (no target %q declared; active=%d)\n",
+				d.VirtualName, d.Adapter, resp.CurrentTarget, d.ActiveConns)
 			continue
 		}
-		fmt.Printf("  %s -> %s (db=%s upstream=%s:%d active=%d)\n",
-			d.VirtualName, d.Current, d.CurrentDatabase, d.CurrentHost, d.CurrentPort, d.ActiveConns)
+		fmt.Printf("  %s [%s] -> %s (db=%s upstream=%s:%d active=%d)\n",
+			d.VirtualName, d.Adapter, d.Current, d.CurrentDatabase, d.CurrentHost, d.CurrentPort, d.ActiveConns)
 	}
 	return nil
 }

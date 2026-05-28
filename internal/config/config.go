@@ -78,10 +78,38 @@ var SupportedSSLModes = []string{SSLModeDisable, SSLModeRequire}
 var SupportedAdapters = []string{AdapterMySQL, AdapterPostgres}
 
 type Config struct {
-	Port           int                      `yaml:"port"`
+	// ListenPorts maps an adapter name to the TCP port the proxy listens on
+	// for that protocol (127.0.0.1 only). One dbpivot instance can serve
+	// several adapters at once, each on its own port; a database's adapter
+	// selects which port its clients connect to. Every adapter used by a
+	// database must have an entry here.
+	ListenPorts    map[string]int           `yaml:"listen_ports"`
 	ControlSocket  string                   `yaml:"control_socket"`
 	ForwardTargets map[string]ForwardTarget `yaml:"forward_targets,omitempty"`
 	Databases      []Database               `yaml:"databases"`
+}
+
+// ListenPort returns the configured listen port for adapter, if any.
+func (cfg *Config) ListenPort(adapter string) (int, bool) {
+	p, ok := cfg.ListenPorts[adapter]
+	return p, ok
+}
+
+// UsedAdapters returns the sorted, de-duplicated set of adapters declared by
+// the databases.
+func (cfg *Config) UsedAdapters() []string {
+	seen := make(map[string]struct{}, len(cfg.Databases))
+	for i := range cfg.Databases {
+		if a := cfg.Databases[i].Adapter; a != "" {
+			seen[a] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for a := range seen {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out
 }
 
 const (
@@ -129,8 +157,21 @@ func Load(path string, logger *slog.Logger) (*Config, error) {
 // Validate enforces the configuration rules. Non-fatal observations are
 // logged as warnings via the provided logger (may be nil).
 func Validate(cfg *Config, logger *slog.Logger) error {
-	if cfg.Port < 1 || cfg.Port > 65535 {
-		return fmt.Errorf("port must be in [1, 65535], got %d", cfg.Port)
+	if len(cfg.ListenPorts) == 0 {
+		return fmt.Errorf("listen_ports must define at least one adapter port")
+	}
+	seenPorts := make(map[int]string, len(cfg.ListenPorts))
+	for adapter, port := range cfg.ListenPorts {
+		if !isSupportedAdapter(adapter) {
+			return fmt.Errorf("listen_ports has unsupported adapter %q (supported: %v)", adapter, SupportedAdapters)
+		}
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("listen_ports[%q] must be in [1, 65535], got %d", adapter, port)
+		}
+		if other, dup := seenPorts[port]; dup {
+			return fmt.Errorf("listen_ports[%q] and listen_ports[%q] both use port %d", other, adapter, port)
+		}
+		seenPorts[port] = adapter
 	}
 
 	for name, ft := range cfg.ForwardTargets {
@@ -151,7 +192,6 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 
 	seenDatabases := make(map[string]struct{})
 	var canonicalTargets []string // sorted target names from the first database
-	var firstAdapter string       // adapter declared by the first database
 	for i := range cfg.Databases {
 		d := &cfg.Databases[i]
 		if d.VirtualName == "" {
@@ -171,13 +211,12 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 		if !isSupportedAdapter(d.Adapter) {
 			return fmt.Errorf("database %q: unsupported adapter %q (supported: %v)", d.VirtualName, d.Adapter, SupportedAdapters)
 		}
-		// All databases share a single listen port. PostgreSQL is client-first
-		// while MySQL is server-first, so the proxy must commit to one wire
-		// protocol per port; mixing adapters on one instance is rejected.
-		if i == 0 {
-			firstAdapter = d.Adapter
-		} else if d.Adapter != firstAdapter {
-			return fmt.Errorf("database %q: adapter %q differs from the first database's adapter %q; all databases must share one adapter", d.VirtualName, d.Adapter, firstAdapter)
+		// Each adapter is served on its own listen port (PostgreSQL is
+		// client-first, MySQL server-first, so a port commits to one wire
+		// protocol). A database whose adapter has no listen_ports entry can
+		// never receive traffic, so reject it.
+		if _, ok := cfg.ListenPorts[d.Adapter]; !ok {
+			return fmt.Errorf("database %q: adapter %q has no listen_ports entry", d.VirtualName, d.Adapter)
 		}
 
 		if len(d.Targets) == 0 {
@@ -252,6 +291,21 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 				"virtual_name", d.VirtualName,
 				"targets", names,
 				"first_database_targets", canonicalTargets)
+		}
+	}
+
+	// Warn about listen ports that no database uses — the port would bind but
+	// every connection to it would fail to route.
+	if logger != nil {
+		used := make(map[string]struct{})
+		for _, a := range cfg.UsedAdapters() {
+			used[a] = struct{}{}
+		}
+		for adapter, port := range cfg.ListenPorts {
+			if _, ok := used[adapter]; !ok {
+				logger.Warn("listen_ports declares an adapter no database uses; the port will accept connections but none can route",
+					"adapter", adapter, "port", port)
+			}
 		}
 	}
 

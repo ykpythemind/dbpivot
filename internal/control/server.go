@@ -20,7 +20,7 @@ type Daemon interface {
 	Databases() map[string]*proxy.Database
 	CurrentTarget() (string, map[string]string)
 	SwitchAll(target string, vars map[string]string) ([]proxy.SwitchResult, error)
-	Addr() string
+	Addrs() map[string]string
 	IsClosed() bool
 }
 
@@ -140,9 +140,9 @@ func (s *Server) handleUse(c net.Conn, req *Request) {
 
 func (s *Server) handleStatus(c net.Conn, _ *Request) {
 	target, _ := s.daemon.CurrentTarget()
-	resp := Response{OK: true, Port: s.cfg.Port, CurrentTarget: target}
+	resp := Response{OK: true, Ports: s.cfg.ListenPorts, CurrentTarget: target}
 	for name, d := range s.daemon.Databases() {
-		ds := DatabaseStatus{VirtualName: name, ActiveConns: d.ActiveConns()}
+		ds := DatabaseStatus{VirtualName: name, Adapter: d.Adapter(), ActiveConns: d.ActiveConns()}
 		if cur, ok := d.Current(); ok {
 			ds.Current = cur.Name
 			ds.CurrentDatabase = cur.Database

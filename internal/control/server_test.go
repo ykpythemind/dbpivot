@@ -26,7 +26,7 @@ func shortSocketPath(t *testing.T) string {
 func setup(t *testing.T) (sockPath string, srv *Server, dm *proxy.Server) {
 	t.Helper()
 	cfg := &config.Config{
-		Port: 6432,
+		ListenPorts: map[string]int{config.AdapterPostgres: 6432},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,
@@ -61,8 +61,8 @@ func TestControl_Status(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("not OK: %v", resp.Error)
 	}
-	if resp.Port != 6432 {
-		t.Errorf("port = %d", resp.Port)
+	if resp.Ports[config.AdapterPostgres] != 6432 {
+		t.Errorf("ports = %v", resp.Ports)
 	}
 	if resp.CurrentTarget != "local" {
 		t.Errorf("current_target = %q", resp.CurrentTarget)
@@ -124,7 +124,7 @@ func TestControl_UseUnknownTarget(t *testing.T) {
 // it as Inactive.
 func TestControl_UsePartialSkipsAndInactiveStatus(t *testing.T) {
 	cfg := &config.Config{
-		Port: 6432,
+		ListenPorts: map[string]int{config.AdapterPostgres: 6432},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,

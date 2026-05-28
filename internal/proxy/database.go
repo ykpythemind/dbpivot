@@ -51,6 +51,7 @@ func (c *Conn) Close() {
 // Server activates all databases before accepting traffic.
 type Database struct {
 	virtualName string
+	adapter     string
 	targets     []config.Target
 	byName      map[string]*config.Target
 	fwd         map[string]config.ForwardTarget
@@ -64,6 +65,7 @@ type Database struct {
 func NewDatabase(c config.Database, fwd map[string]config.ForwardTarget) *Database {
 	out := &Database{
 		virtualName: c.VirtualName,
+		adapter:     c.Adapter,
 		targets:     append([]config.Target(nil), c.Targets...),
 		byName:      make(map[string]*config.Target, len(c.Targets)),
 		fwd:         fwd,
@@ -77,6 +79,10 @@ func NewDatabase(c config.Database, fwd map[string]config.ForwardTarget) *Databa
 
 // VirtualName returns the configured virtual_name (= the dbname clients connect with).
 func (d *Database) VirtualName() string { return d.virtualName }
+
+// Adapter returns the wire protocol this database speaks (config.AdapterPostgres
+// or config.AdapterMySQL). It selects which listen port routes to this database.
+func (d *Database) Adapter() string { return d.adapter }
 
 // Current returns the active resolved target. Returns the zero value and
 // false if the database has not been activated yet.

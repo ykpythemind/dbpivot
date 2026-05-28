@@ -5,8 +5,8 @@
 アプリの接続文字列を書き換えずに、CLI 一発で接続先を切り替えられる。
 
 ```
-local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時 --target local)
-                                                    →  ssm forward → remote DB (use staging で全 DB 同時切替)
+local app  → (postgres:6432 / mysql:3306, dbname=appdb)  →  dbpivot  →  local DB (起動時 --target local)
+                                                                    →  ssm forward → remote DB (use staging で全 DB 同時切替)
 ```
 
 ## 何ができる
@@ -21,7 +21,7 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時
 
 | | |
 |---|---|
-| 対応プロトコル | PostgreSQL / MySQL (1 インスタンス 1 プロトコル。全 database で同じ `adapter` を共有) |
+| 対応プロトコル | PostgreSQL / MySQL (adapter ごとに listen port を分け、1 インスタンスで複数プロトコルを同時に serve 可能) |
 | client → proxy 認証 | **trust** (任意 password で受理) |
 | proxy → upstream 認証 (PostgreSQL) | **SCRAM-SHA-256 のみ** (PG 14+ デフォルト) |
 | proxy → upstream 認証 (MySQL) | `mysql_native_password` / `caching_sha2_password` (fast-auth・TLS 経由 cleartext・RSA full-auth) |
@@ -30,14 +30,16 @@ local app  → (port 6432, dbname=appdb)  →  dbpivot  →  local DB (起動時
 | CancelRequest | v1 では捨てる |
 | 切替時の既存接続 | 即時切断 |
 
-MongoDB、client→proxy TLS、証明書検証あり (`verify-full`)、PG の MD5/cleartext upstream auth は v1 のスコープ外。MySQL は 1 ポート内で PostgreSQL と混在させられない (config で全 database が同じ `adapter` を持つことを強制)。
+MongoDB、client→proxy TLS、証明書検証あり (`verify-full`)、PG の MD5/cleartext upstream auth は v1 のスコープ外。PostgreSQL は client-first、MySQL は server-first なので 1 ポートは 1 プロトコルに固定される。両方を扱いたい場合は `listen_ports` で adapter ごとにポートを割り当てる (PostgreSQL の database は postgres 用ポートへ、MySQL の database は mysql 用ポートへ、それぞれ routing される)。
 
 ## 設定ファイル
 
 カレントディレクトリの `.dbpivot.yml` を既定で読む (任意のパスにしたい場合は `--config PATH`)。
 
 ```yaml
-port: 6432                                   # アプリが接続する単一の listen port (127.0.0.1)
+listen_ports:                                # adapter ごとの listen port (127.0.0.1)。使う adapter の分だけ書く
+  postgres: 6432                             # postgres の database が接続するポート
+  mysql: 3306                                # mysql の database が接続するポート (mysql を使わないなら省略可)
 control_socket: /tmp/dbpivot.sock            # 省略可
 
 forward_targets:                             # 省略可。inline 派なら不要
@@ -49,7 +51,7 @@ forward_targets:                             # 省略可。inline 派なら不�
     port: 15433
 
 databases:
-  - adapter: postgres                        # 必須。`postgres` / `mysql` をサポート (全 database で統一)
+  - adapter: postgres                        # 必須。`postgres` / `mysql` をサポート。使う adapter は listen_ports に対応ポートが必要
     virtual_name: appdb                      # アプリは dbname=appdb で接続 (= 論理名)
     targets:
       - name: local                          # target 名は全 database で共通推奨
@@ -93,7 +95,8 @@ databases:
 
 ### バリデーション要点
 
-- 各 database には `adapter` が必須。サポートされるのは `postgres` / `mysql`。1 ポートは 1 プロトコルなので、全 database が同じ `adapter` を持つ必要がある (混在は起動時にエラー)。
+- 各 database には `adapter` が必須。サポートされるのは `postgres` / `mysql`。adapter は混在させてよいが、使う adapter には `listen_ports` の対応エントリが必須 (無いと起動時にエラー)。1 ポートは 1 プロトコル固定で、`listen_ports` のポートは重複不可。
+- `listen_ports` は最低 1 つの adapter ポートを定義する。どの database にも使われていない adapter のポートは warning (接続は受けるが routing できない)。
 - 全 database が同じ target 名集合を持つことを推奨。違っていても起動はする (warning) — DB が staging にまだ用意できていない、といった移行途中の状態を許容するため。`use <target>` 時にその target を持たない database は inactive 化される。
 - target は inline (`host` + `port`) か `forward_to` のどちらか一方 (XOR)。
 - `user`, `password` は target ごとに必須。
@@ -148,9 +151,9 @@ dbpivot status [--config PATH] [--json]
 ```bash
 # 確認
 dbpivot status
-# listening on 127.0.0.1:6432  current target: local
-#   appdb     -> local (db=app_dev upstream=127.0.0.1:5432 active=0)
-#   analytics -> local (db=analytics_dev upstream=127.0.0.1:5432 active=0)
+# listening postgres=127.0.0.1:6432  current target: local
+#   appdb     [postgres] -> local (db=app_dev upstream=127.0.0.1:5432 active=0)
+#   analytics [postgres] -> local (db=analytics_dev upstream=127.0.0.1:5432 active=0)
 
 # 全 database を staging に同時切替
 dbpivot use staging --var BRANCH=main
@@ -169,7 +172,7 @@ cmd/dbpivot/main.go        // cobra CLI
 internal/
   config/    config.go             // YAML ロード + バリデーション
              variables.go          // ${VAR} 展開
-  proxy/     server.go             // 単一 TCP listener + accept + 振り分け + SwitchAll
+  proxy/     server.go             // adapter ごとの TCP listener + accept + 振り分け + SwitchAll
              database.go           // Database, ResolveTarget / Apply, conn registry
              pgwire.go             // PG メッセージ framing と各種 encode/decode
              auth.go               // upstream SCRAM-SHA-256 driver

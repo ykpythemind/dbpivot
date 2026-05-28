@@ -96,14 +96,21 @@ func startServer(t *testing.T, cfg *config.Config) *Server {
 	go s.Start()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		c, err := net.Dial("tcp", s.Addr())
-		if err == nil {
+		ready := true
+		for _, addr := range s.Addrs() {
+			c, err := net.Dial("tcp", addr)
+			if err != nil {
+				ready = false
+				break
+			}
 			c.Close()
+		}
+		if ready {
 			return s
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("server did not start on %s", s.Addr())
+	t.Fatalf("server did not start on %v", s.Addrs())
 	return nil
 }
 
@@ -123,7 +130,7 @@ func TestServer_RouteByDbnameAndRewriteDatabase(t *testing.T) {
 	defer up.close()
 
 	cfg := &config.Config{
-		Port: freePort(t),
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,
@@ -137,7 +144,7 @@ func TestServer_RouteByDbnameAndRewriteDatabase(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, err := net.Dial("tcp", s.Addr())
+	c, err := net.Dial("tcp", s.AddrFor(config.AdapterPostgres))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +194,7 @@ func TestServer_SSLRequestThenStartup(t *testing.T) {
 	defer up.close()
 
 	cfg := &config.Config{
-		Port: freePort(t),
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,
@@ -201,7 +208,7 @@ func TestServer_SSLRequestThenStartup(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, err := net.Dial("tcp", s.Addr())
+	c, err := net.Dial("tcp", s.AddrFor(config.AdapterPostgres))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +239,7 @@ func TestServer_SSLRequestThenStartup(t *testing.T) {
 
 func TestServer_UnknownDatabaseReturnsErrorResponse(t *testing.T) {
 	cfg := &config.Config{
-		Port: freePort(t),
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,
@@ -246,7 +253,7 @@ func TestServer_UnknownDatabaseReturnsErrorResponse(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, err := net.Dial("tcp", s.Addr())
+	c, err := net.Dial("tcp", s.AddrFor(config.AdapterPostgres))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +276,7 @@ func TestServer_UnknownDatabaseReturnsErrorResponse(t *testing.T) {
 
 func TestServer_CancelRequestDropped(t *testing.T) {
 	cfg := &config.Config{
-		Port: freePort(t),
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,
@@ -283,7 +290,7 @@ func TestServer_CancelRequestDropped(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, err := net.Dial("tcp", s.Addr())
+	c, err := net.Dial("tcp", s.AddrFor(config.AdapterPostgres))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +312,7 @@ func TestServer_EmptyDatabasePassthrough(t *testing.T) {
 	defer up.close()
 
 	cfg := &config.Config{
-		Port: freePort(t),
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,
@@ -319,7 +326,7 @@ func TestServer_EmptyDatabasePassthrough(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, err := net.Dial("tcp", s.Addr())
+	c, err := net.Dial("tcp", s.AddrFor(config.AdapterPostgres))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +351,7 @@ func TestServer_BidiPipeAfterAuth(t *testing.T) {
 	defer up.close()
 
 	cfg := &config.Config{
-		Port: freePort(t),
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,
@@ -358,7 +365,7 @@ func TestServer_BidiPipeAfterAuth(t *testing.T) {
 	s := startServer(t, cfg)
 	defer s.Shutdown(context.Background())
 
-	c, err := net.Dial("tcp", s.Addr())
+	c, err := net.Dial("tcp", s.AddrFor(config.AdapterPostgres))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +398,7 @@ func TestServer_BidiPipeAfterAuth(t *testing.T) {
 // second (Skipped=true, no error).
 func TestSwitchAll_SkipsDatabasesMissingTarget(t *testing.T) {
 	cfg := &config.Config{
-		Port: freePort(t),
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,
@@ -450,7 +457,7 @@ func TestSwitchAll_SkipsDatabasesMissingTarget(t *testing.T) {
 // database declares the target — fails cleanly without mutating state.
 func TestSwitchAll_AllSkippedErrors(t *testing.T) {
 	cfg := &config.Config{
-		Port: freePort(t),
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,
@@ -482,7 +489,7 @@ func TestSwitchAll_AllSkippedErrors(t *testing.T) {
 // ErrorResponse rather than blocking or panicking.
 func TestSwitchAll_InactiveDatabaseGetsCleanPgError(t *testing.T) {
 	cfg := &config.Config{
-		Port: freePort(t),
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
 		Databases: []config.Database{
 			{
 				Adapter:     config.AdapterPostgres,
@@ -508,7 +515,7 @@ func TestSwitchAll_InactiveDatabaseGetsCleanPgError(t *testing.T) {
 		t.Fatalf("SwitchAll: %v", err)
 	}
 
-	c, err := net.Dial("tcp", s.Addr())
+	c, err := net.Dial("tcp", s.AddrFor(config.AdapterPostgres))
 	if err != nil {
 		t.Fatal(err)
 	}

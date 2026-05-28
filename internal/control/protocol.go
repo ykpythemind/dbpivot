@@ -24,7 +24,7 @@ type Response struct {
 	Missing  []string       `json:"missing,omitempty"`
 
 	// `status`
-	Port          int              `json:"port,omitempty"`
+	Ports         map[string]int   `json:"ports,omitempty"` // adapter -> listen port
 	CurrentTarget string           `json:"current_target,omitempty"`
 	Databases     []DatabaseStatus `json:"databases,omitempty"`
 }
@@ -45,6 +45,7 @@ type SwitchResult struct {
 
 type DatabaseStatus struct {
 	VirtualName     string `json:"virtual_name"`
+	Adapter         string `json:"adapter,omitempty"`
 	Current         string `json:"current,omitempty"`
 	CurrentDatabase string `json:"current_database,omitempty"`
 	CurrentHost     string `json:"current_host,omitempty"`
