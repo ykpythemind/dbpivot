@@ -11,6 +11,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ykpythemind/dbpivot/internal/config"
@@ -33,15 +34,24 @@ type SwitchResult struct {
 	Skipped          bool
 }
 
-// Server hosts the single TCP listener and the per-database routing state.
-// All databases share a single global target name and variable set.
+// Server hosts one TCP listener per configured adapter and the per-database
+// routing state. All databases share a single global target name and variable
+// set, regardless of adapter.
 type Server struct {
-	addr   string
 	logger *slog.Logger
 
-	listener net.Listener
+	// listenAddrs maps each served adapter to the bind address of its listener
+	// (e.g. "postgres" -> "127.0.0.1:6432"). Built from config.ListenPorts,
+	// restricted to adapters some database actually uses. Each adapter commits
+	// its port to one wire protocol (PG is client-first, MySQL server-first).
+	listenAddrs map[string]string
+
+	// connSeq hands out monotonically increasing per-connection ids, used as
+	// the MySQL connection id advertised in the greeting.
+	connSeq atomic.Uint32
 
 	mu            sync.RWMutex
+	listeners     map[string]net.Listener // adapter -> live listener (set in Start)
 	databases     map[string]*Database
 	cfg           *config.Config
 	currentTarget string
@@ -62,8 +72,19 @@ func New(cfg *config.Config, target string, vars map[string]string, logger *slog
 	for _, c := range cfg.Databases {
 		databases[c.VirtualName] = NewDatabase(c, cfg.ForwardTargets)
 	}
+	// Bind one listener per adapter a database actually uses. Validate has
+	// already guaranteed every such adapter has a listen_ports entry.
+	listenHost := cfg.ListenHostOrDefault()
+	listenAddrs := make(map[string]string)
+	for _, adapter := range cfg.UsedAdapters() {
+		port, ok := cfg.ListenPort(adapter)
+		if !ok {
+			return nil, fmt.Errorf("adapter %q has no listen_ports entry", adapter)
+		}
+		listenAddrs[adapter] = net.JoinHostPort(listenHost, strconv.Itoa(port))
+	}
 	s := &Server{
-		addr:        net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Port)),
+		listenAddrs: listenAddrs,
 		databases:   databases,
 		cfg:         cfg,
 		currentVars: cloneVars(vars),
@@ -86,10 +107,17 @@ func (s *Server) Databases() map[string]*Database {
 	return out
 }
 
-func (s *Server) lookupDatabase(name string) *Database {
+// lookupDatabase finds a database by name, but only if it speaks the given
+// adapter. Routing is adapter-scoped so a client on (say) the PostgreSQL port
+// can never reach a MySQL database that happens to share its name.
+func (s *Server) lookupDatabase(adapter, name string) *Database {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.databases[name]
+	d := s.databases[name]
+	if d == nil || d.Adapter() != adapter {
+		return nil
+	}
+	return d
 }
 
 // CurrentTarget reports the active global target name and the variables it
@@ -100,14 +128,32 @@ func (s *Server) CurrentTarget() (string, map[string]string) {
 	return s.currentTarget, cloneVars(s.currentVars)
 }
 
-// Addr returns the listen address.
-func (s *Server) Addr() string {
+// Addrs returns the live listen address for each served adapter. Before Start
+// binds the listeners it reports the configured bind addresses; afterwards it
+// reports the actual addresses (which differ when a port-0 was requested).
+func (s *Server) Addrs() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.listener != nil {
-		return s.listener.Addr().String()
+	out := make(map[string]string, len(s.listenAddrs))
+	for adapter, addr := range s.listenAddrs {
+		if ln := s.listeners[adapter]; ln != nil {
+			out[adapter] = ln.Addr().String()
+		} else {
+			out[adapter] = addr
+		}
 	}
-	return s.addr
+	return out
+}
+
+// AddrFor returns the live listen address for a single adapter, or "" if the
+// server does not serve it.
+func (s *Server) AddrFor(adapter string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if ln := s.listeners[adapter]; ln != nil {
+		return ln.Addr().String()
+	}
+	return s.listenAddrs[adapter]
 }
 
 // IsClosed reports whether Shutdown has been initiated.
@@ -200,23 +246,65 @@ func (e *SwitchPlanError) Error() string {
 	return fmt.Sprintf("database %q: %v", e.VirtualName, e.Err)
 }
 
-// Start binds the listener and runs the accept loop. It returns once the
-// listener has stopped accepting (typically because of Shutdown).
+// Start binds one listener per served adapter and runs an accept loop for each
+// concurrently. It returns once every listener has stopped accepting (typically
+// because of Shutdown), surfacing the first non-shutdown error.
 func (s *Server) Start() error {
-	ln, err := net.Listen("tcp", s.addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", s.addr, err)
+	// Bind all listeners up front so a port conflict fails fast (and before
+	// any accept loop starts) rather than half-starting.
+	listeners := make(map[string]net.Listener, len(s.listenAddrs))
+	for adapter, addr := range s.listenAddrs {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			for _, opened := range listeners {
+				_ = opened.Close()
+			}
+			return fmt.Errorf("listen %s (%s): %w", addr, adapter, err)
+		}
+		listeners[adapter] = ln
 	}
+
 	s.mu.Lock()
-	s.listener = ln
+	if s.closed {
+		s.mu.Unlock()
+		for _, ln := range listeners {
+			_ = ln.Close()
+		}
+		return nil
+	}
+	s.listeners = listeners
 	s.mu.Unlock()
-	s.logger.Info("listening", "addr", ln.Addr(), "target", s.currentTarget)
+
+	for adapter, ln := range listeners {
+		s.logger.Info("listening", "adapter", adapter, "addr", ln.Addr(), "target", s.currentTarget)
+	}
 	for name, d := range s.Databases() {
 		if c, ok := d.Current(); ok {
-			s.logger.Info("database ready", "virtual_name", name, "target", c.Name, "database", c.Database, "upstream", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)))
+			s.logger.Info("database ready", "virtual_name", name, "adapter", d.Adapter(), "target", c.Name, "database", c.Database, "upstream", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)))
 		}
 	}
 
+	errCh := make(chan error, len(listeners))
+	var loops sync.WaitGroup
+	for adapter, ln := range listeners {
+		loops.Add(1)
+		go func(adapter string, ln net.Listener) {
+			defer loops.Done()
+			errCh <- s.acceptLoop(adapter, ln)
+		}(adapter, ln)
+	}
+	loops.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// acceptLoop serves a single adapter's listener until it stops accepting.
+func (s *Server) acceptLoop(adapter string, ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -228,7 +316,7 @@ func (s *Server) Start() error {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			s.handleConn(conn)
+			s.handleConn(conn, adapter)
 		}()
 	}
 }
@@ -243,10 +331,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.closed = true
 	databases := s.databases
-	ln := s.listener
+	listeners := s.listeners
 	s.mu.Unlock()
 
-	if ln != nil {
+	for _, ln := range listeners {
 		_ = ln.Close()
 	}
 	for _, d := range databases {
@@ -265,12 +353,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) handleConn(client net.Conn) {
+func (s *Server) handleConn(client net.Conn, adapter string) {
 	defer client.Close()
-	if err := s.dispatch(client); err != nil {
-		if !errors.Is(err, io.EOF) {
-			s.logger.Warn("conn closed", "remote", client.RemoteAddr(), "err", err)
-		}
+	var err error
+	switch adapter {
+	case config.AdapterMySQL:
+		err = s.dispatchMySQL(client)
+	default:
+		err = s.dispatch(client)
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		s.logger.Warn("conn closed", "remote", client.RemoteAddr(), "err", err)
 	}
 }
 
@@ -324,7 +417,7 @@ func (s *Server) handleStartup(client net.Conn, br *bufio.Reader, msgLen int) er
 		dbname = LookupParam(params, "user")
 	}
 
-	database := s.lookupDatabase(dbname)
+	database := s.lookupDatabase(config.AdapterPostgres, dbname)
 	if database == nil {
 		_ = WriteErrorResponse(client, "FATAL", "3D000", fmt.Sprintf("database %q not configured", dbname))
 		s.logger.Info("unknown database", "dbname", dbname, "remote", client.RemoteAddr())

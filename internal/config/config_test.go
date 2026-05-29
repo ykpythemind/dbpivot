@@ -9,7 +9,7 @@ import (
 
 func baseCfg() *Config {
 	return &Config{
-		Port: 6432,
+		ListenPorts: map[string]int{AdapterPostgres: 6432},
 		ForwardTargets: map[string]ForwardTarget{
 			"ssm-staging": {Host: "127.0.0.1", Port: 15432},
 		},
@@ -40,14 +40,60 @@ func TestValidate_SSLModeRequireOK(t *testing.T) {
 	}
 }
 
+func TestValidate_MySQLAdapterOK(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Databases[0].Adapter = AdapterMySQL
+	cfg.ListenPorts = map[string]int{AdapterMySQL: 3306}
+	if err := Validate(cfg, nil); err != nil {
+		t.Fatalf("all-mysql config should validate: %v", err)
+	}
+}
+
+func TestValidate_MySQLSSLModeRequireOK(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Databases[0].Adapter = AdapterMySQL
+	cfg.ListenPorts = map[string]int{AdapterMySQL: 3306}
+	cfg.Databases[0].Targets[1].SSLMode = SSLModeRequire
+	if err := Validate(cfg, nil); err != nil {
+		t.Fatalf("mysql sslmode=require should validate: %v", err)
+	}
+}
+
+// TestValidate_MixedAdaptersOK verifies that databases on different adapters now
+// coexist in one config, provided each adapter has a listen port.
+func TestValidate_MixedAdaptersOK(t *testing.T) {
+	cfg := baseCfg()
+	cfg.ListenPorts = map[string]int{AdapterPostgres: 6432, AdapterMySQL: 3306}
+	cfg.Databases = append(cfg.Databases, Database{
+		Adapter:     AdapterMySQL,
+		VirtualName: "mydb",
+		Targets: []Target{
+			{Name: "local", Host: "127.0.0.1", Port: 3306, User: "u", Password: "p", Database: "app_dev"},
+			{Name: "staging", ForwardTo: "ssm-staging", User: "u", Password: "p", Database: "app_${BRANCH}_staging"},
+		},
+	})
+	if err := Validate(cfg, nil); err != nil {
+		t.Fatalf("mixed adapters with both ports should validate: %v", err)
+	}
+}
+
 func TestValidate_Errors(t *testing.T) {
 	cases := []struct {
 		name    string
 		mutate  func(*Config)
 		errPart string
 	}{
-		{"port_zero", func(c *Config) { c.Port = 0 }, "port must be in"},
-		{"port_too_large", func(c *Config) { c.Port = 70000 }, "port must be in"},
+		{"no_listen_ports", func(c *Config) { c.ListenPorts = nil }, "listen_ports must define"},
+		{"listen_port_zero", func(c *Config) { c.ListenPorts[AdapterPostgres] = 0 }, "must be in"},
+		{"listen_port_too_large", func(c *Config) { c.ListenPorts[AdapterPostgres] = 70000 }, "must be in"},
+		{"listen_port_unsupported_adapter", func(c *Config) { c.ListenPorts["mongodb"] = 27017 }, "unsupported adapter"},
+		{"listen_port_duplicate", func(c *Config) { c.ListenPorts[AdapterMySQL] = 6432 }, "both use port"},
+		{"adapter_no_listen_port", func(c *Config) {
+			second := c.Databases[0]
+			second.VirtualName = "other"
+			second.Adapter = AdapterMySQL
+			c.Databases = append(c.Databases, second)
+		}, "no listen_ports entry"},
 		{"no_databases", func(c *Config) { c.Databases = nil }, "at least one database"},
 		{"empty_virtual_name", func(c *Config) { c.Databases[0].VirtualName = "" }, "virtual_name is empty"},
 		{"bad_virtual_name", func(c *Config) { c.Databases[0].VirtualName = "has space" }, "valid identifier"},

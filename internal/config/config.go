@@ -49,17 +49,20 @@ type Target struct {
 
 type Database struct {
 	// Adapter selects the wire protocol used for both the client→proxy and
-	// proxy→upstream legs of this database. v1 only supports
-	// AdapterPostgres; the field is required (no default) so configs are
-	// explicit about which protocol they assume.
+	// proxy→upstream legs of this database (AdapterPostgres or AdapterMySQL).
+	// The field is required (no default) so configs are explicit about which
+	// protocol they assume. All databases in one config must share an adapter
+	// since they share a single listen port.
 	Adapter     string   `yaml:"adapter"`
 	VirtualName string   `yaml:"virtual_name"`
 	Targets     []Target `yaml:"targets"`
 }
 
-// Adapter values. v1 only ships AdapterPostgres; new adapters added later
-// (mysql, mongo, ...) extend this set.
-const AdapterPostgres = "postgres"
+// Adapter values. New adapters added later (mongo, ...) extend this set.
+const (
+	AdapterPostgres = "postgres"
+	AdapterMySQL    = "mysql"
+)
 
 // SSL modes for the proxy→upstream leg.
 const (
@@ -72,13 +75,58 @@ var SupportedSSLModes = []string{SSLModeDisable, SSLModeRequire}
 
 // SupportedAdapters lists every adapter the validator accepts. Kept sorted
 // for stable error messages.
-var SupportedAdapters = []string{AdapterPostgres}
+var SupportedAdapters = []string{AdapterMySQL, AdapterPostgres}
 
 type Config struct {
-	Port           int                      `yaml:"port"`
+	// ListenHost is the bind interface for every listen port (defaults to
+	// 127.0.0.1). Set to "0.0.0.0" — or a specific LAN / bridge address — to
+	// expose the proxy beyond the local machine; the default keeps the proxy
+	// reachable only from this host.
+	ListenHost string `yaml:"listen_host,omitempty"`
+
+	// ListenPorts maps an adapter name to the TCP port the proxy listens on
+	// for that protocol. One dbpivot instance can serve several adapters at
+	// once, each on its own port; a database's adapter selects which port its
+	// clients connect to. Every adapter used by a database must have an entry
+	// here.
+	ListenPorts    map[string]int           `yaml:"listen_ports"`
 	ControlSocket  string                   `yaml:"control_socket"`
 	ForwardTargets map[string]ForwardTarget `yaml:"forward_targets,omitempty"`
 	Databases      []Database               `yaml:"databases"`
+}
+
+// DefaultListenHost is the bind address used when listen_host is unset.
+const DefaultListenHost = "127.0.0.1"
+
+// ListenHostOrDefault returns ListenHost if set, otherwise DefaultListenHost.
+func (cfg *Config) ListenHostOrDefault() string {
+	if cfg.ListenHost == "" {
+		return DefaultListenHost
+	}
+	return cfg.ListenHost
+}
+
+// ListenPort returns the configured listen port for adapter, if any.
+func (cfg *Config) ListenPort(adapter string) (int, bool) {
+	p, ok := cfg.ListenPorts[adapter]
+	return p, ok
+}
+
+// UsedAdapters returns the sorted, de-duplicated set of adapters declared by
+// the databases.
+func (cfg *Config) UsedAdapters() []string {
+	seen := make(map[string]struct{}, len(cfg.Databases))
+	for i := range cfg.Databases {
+		if a := cfg.Databases[i].Adapter; a != "" {
+			seen[a] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for a := range seen {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out
 }
 
 const (
@@ -126,8 +174,29 @@ func Load(path string, logger *slog.Logger) (*Config, error) {
 // Validate enforces the configuration rules. Non-fatal observations are
 // logged as warnings via the provided logger (may be nil).
 func Validate(cfg *Config, logger *slog.Logger) error {
-	if cfg.Port < 1 || cfg.Port > 65535 {
-		return fmt.Errorf("port must be in [1, 65535], got %d", cfg.Port)
+	if len(cfg.ListenPorts) == 0 {
+		return fmt.Errorf("listen_ports must define at least one adapter port")
+	}
+	// client→proxy auth is trust (any password accepted), so binding beyond
+	// loopback exposes every configured upstream to anyone who can reach the
+	// listen interface. Warn loudly when that happens; the operator may still
+	// want it (containers reaching a host-side proxy, shared dev env, etc.).
+	if logger != nil && cfg.ListenHost != "" && cfg.ListenHost != DefaultListenHost && cfg.ListenHost != "localhost" {
+		logger.Warn("listen_host is not loopback; client→proxy auth is trust, so the proxy will accept any password from anyone who can reach this address",
+			"listen_host", cfg.ListenHost)
+	}
+	seenPorts := make(map[int]string, len(cfg.ListenPorts))
+	for adapter, port := range cfg.ListenPorts {
+		if !isSupportedAdapter(adapter) {
+			return fmt.Errorf("listen_ports has unsupported adapter %q (supported: %v)", adapter, SupportedAdapters)
+		}
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("listen_ports[%q] must be in [1, 65535], got %d", adapter, port)
+		}
+		if other, dup := seenPorts[port]; dup {
+			return fmt.Errorf("listen_ports[%q] and listen_ports[%q] both use port %d", other, adapter, port)
+		}
+		seenPorts[port] = adapter
 	}
 
 	for name, ft := range cfg.ForwardTargets {
@@ -166,6 +235,13 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 		}
 		if !isSupportedAdapter(d.Adapter) {
 			return fmt.Errorf("database %q: unsupported adapter %q (supported: %v)", d.VirtualName, d.Adapter, SupportedAdapters)
+		}
+		// Each adapter is served on its own listen port (PostgreSQL is
+		// client-first, MySQL server-first, so a port commits to one wire
+		// protocol). A database whose adapter has no listen_ports entry can
+		// never receive traffic, so reject it.
+		if _, ok := cfg.ListenPorts[d.Adapter]; !ok {
+			return fmt.Errorf("database %q: adapter %q has no listen_ports entry", d.VirtualName, d.Adapter)
 		}
 
 		if len(d.Targets) == 0 {
@@ -243,6 +319,21 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 		}
 	}
 
+	// Warn about listen ports that no database uses — the port would bind but
+	// every connection to it would fail to route.
+	if logger != nil {
+		used := make(map[string]struct{})
+		for _, a := range cfg.UsedAdapters() {
+			used[a] = struct{}{}
+		}
+		for adapter, port := range cfg.ListenPorts {
+			if _, ok := used[adapter]; !ok {
+				logger.Warn("listen_ports declares an adapter no database uses; the port will accept connections but none can route",
+					"adapter", adapter, "port", port)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -315,4 +406,3 @@ func (t *Target) ResolveEndpoint(fwd map[string]ForwardTarget) (host string, por
 	ft := fwd[t.ForwardTo]
 	return ft.Host, ft.Port
 }
-
