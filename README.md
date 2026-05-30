@@ -224,6 +224,31 @@ CLI レイヤを含む e2e は `e2e/run.sh` から走らせる (docker / psql / 
 ./e2e/run.sh
 ```
 
+## リリース
+
+[GoReleaser](https://goreleaser.com) で linux / darwin × amd64 / arm64 のバイナリをビルドし、GitHub Releases に公開する。**バージョンタグ (`v*`) を push するだけ**で `.github/workflows/release.yml` が発火し、自動でリリースされる。
+
+```bash
+# main にマージ済みの状態でタグを打って push
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+push をトリガーに GoReleaser が `dbpivot_<version>_<os>_<arch>.tar.gz` と `checksums.txt` を Releases に公開する。
+
+- changelog は GitHub のコミットから自動生成 (`docs:` / `test:` / `ci:` / `chore:` / Merge 系は除外)
+- `v1.2.3-rc1` のような pre-release タグは `prerelease: auto` で自動的に prerelease 扱いになる
+- バージョンは `-X main.version={{.Version}}` で埋め込まれ、`dbpivot --version` で確認できる
+
+タグを打つ前のローカル確認 (公開はされない):
+
+```bash
+goreleaser check                       # .goreleaser.yaml の検証
+goreleaser release --snapshot --clean  # dist/ にビルドして中身を確認
+```
+
+設定は [.goreleaser.yaml](.goreleaser.yaml)、CI は [.github/workflows/release.yml](.github/workflows/release.yml) を参照。
+
 ## 設計の詳細
 
 実装プランは [docs/plans/2026-05-12-dbpivot-implementation.md](docs/plans/2026-05-12-dbpivot-implementation.md) に。
