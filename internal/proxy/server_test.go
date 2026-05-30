@@ -535,5 +535,160 @@ func TestSwitchAll_InactiveDatabaseGetsCleanPgError(t *testing.T) {
 	}
 }
 
+// fakeProbeUpstream is a minimal PG upstream that completes a SCRAM handshake,
+// signals ReadyForQuery, then for a `select 1` either replies with a clean
+// CommandComplete+ReadyForQuery or an ErrorResponse, depending on failQuery.
+type fakeProbeUpstream struct {
+	ln        net.Listener
+	port      int
+	user      string
+	password  string
+	failQuery bool
+}
+
+func newFakeProbeUpstream(t *testing.T, user, password string, failQuery bool) *fakeProbeUpstream {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fu := &fakeProbeUpstream{ln: ln, port: ln.Addr().(*net.TCPAddr).Port, user: user, password: password, failQuery: failQuery}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go fu.serve(c)
+		}
+	}()
+	return fu
+}
+
+func (fu *fakeProbeUpstream) serve(c net.Conn) {
+	defer c.Close()
+	// Read and discard the StartupMessage frame.
+	var lb [4]byte
+	if _, err := io.ReadFull(c, lb[:]); err != nil {
+		return
+	}
+	body := make([]byte, binary.BigEndian.Uint32(lb[:])-4)
+	if _, err := io.ReadFull(c, body); err != nil {
+		return
+	}
+	if err := runFakeSCRAMServer(c, fu.user, fu.password); err != nil {
+		return
+	}
+	// Post-auth: ReadyForQuery (status 'I').
+	if err := WriteMessage(c, 'Z', []byte{'I'}); err != nil {
+		return
+	}
+	// Expect the probe's `select 1` Query ('Q').
+	typ, _, err := ReadMessage(c)
+	if err != nil || typ != 'Q' {
+		return
+	}
+	if fu.failQuery {
+		_ = WriteMessage(c, 'E', []byte("SERROR\x00C42601\x00Msyntax\x00\x00"))
+	} else {
+		_ = WriteMessage(c, 'C', append([]byte("SELECT 1"), 0)) // CommandComplete
+	}
+	_ = WriteMessage(c, 'Z', []byte{'I'})
+}
+
+func (fu *fakeProbeUpstream) close() { fu.ln.Close() }
+
+// TestServer_ProbeActive verifies the connect + auth + `select 1` health probe
+// against active targets: a healthy upstream reports OK, a dead endpoint and a
+// query-rejecting upstream report failures, and INACTIVE databases are skipped.
+func TestServer_ProbeActive(t *testing.T) {
+	healthy := newFakeProbeUpstream(t, "alice", "secret", false)
+	defer healthy.close()
+	failing := newFakeProbeUpstream(t, "bob", "pw", true)
+	defer failing.close()
+	deadPort := freePort(t) // closed listener -> connection refused
+
+	cfg := &config.Config{
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
+		Databases: []config.Database{
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "good",
+				Targets:     []config.Target{{Name: "local", Host: "127.0.0.1", Port: healthy.port, User: "alice", Password: "secret", Database: "app"}},
+			},
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "queryfail",
+				Targets:     []config.Target{{Name: "local", Host: "127.0.0.1", Port: failing.port, User: "bob", Password: "pw", Database: "app"}},
+			},
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "down",
+				Targets:     []config.Target{{Name: "local", Host: "127.0.0.1", Port: deadPort, User: "u", Password: "p", Database: "app"}},
+			},
+		},
+	}
+	s, err := New(cfg, "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	byName := map[string]ProbeResult{}
+	for _, r := range s.ProbeActive() {
+		byName[r.VirtualName] = r
+	}
+	if len(byName) != 3 {
+		t.Fatalf("expected 3 probe results, got %d: %+v", len(byName), byName)
+	}
+	if r := byName["good"]; !r.OK || r.Err != "" {
+		t.Errorf("good probe = %+v, want OK", r)
+	}
+	if r := byName["queryfail"]; r.OK || !strings.Contains(r.Err, "query") {
+		t.Errorf("queryfail probe = %+v, want query failure", r)
+	}
+	if r := byName["down"]; r.OK || !strings.Contains(r.Err, "dial") {
+		t.Errorf("down probe = %+v, want dial failure", r)
+	}
+}
+
+// TestServer_ProbeActive_SkipsInactive verifies that a database with no active
+// target is omitted from the probe results entirely.
+func TestServer_ProbeActive_SkipsInactive(t *testing.T) {
+	healthy := newFakeProbeUpstream(t, "alice", "secret", false)
+	defer healthy.close()
+
+	cfg := &config.Config{
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
+		Databases: []config.Database{
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "appdb",
+				Targets: []config.Target{
+					{Name: "local", Host: "127.0.0.1", Port: healthy.port, User: "alice", Password: "secret", Database: "app"},
+					{Name: "staging", Host: "127.0.0.1", Port: healthy.port, User: "alice", Password: "secret", Database: "stg"},
+				},
+			},
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "analytics",
+				Targets:     []config.Target{{Name: "local", Host: "127.0.0.1", Port: healthy.port, User: "alice", Password: "secret", Database: "an"}},
+			},
+		},
+	}
+	s, err := New(cfg, "local", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Switch to staging: analytics does not declare it and goes INACTIVE.
+	if _, err := s.SwitchAll("staging", nil); err != nil {
+		t.Fatalf("SwitchAll: %v", err)
+	}
+
+	results := s.ProbeActive()
+	if len(results) != 1 || results[0].VirtualName != "appdb" {
+		t.Fatalf("expected only appdb probed, got %+v", results)
+	}
+}
+
 // silence unused import warning
 var _ = strconv.Itoa

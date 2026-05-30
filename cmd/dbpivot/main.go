@@ -93,6 +93,11 @@ func runServe() error {
 		return err
 	}
 
+	// Startup health check: connect + auth + `select 1` against every active
+	// target. Warn-and-continue — the proxy dials upstreams lazily, so this is
+	// purely an operator heads-up, never a hard gate.
+	proxy.LogProbeResults(logger, d.ProbeActive())
+
 	ln, err := control.Listen(socketPath)
 	if err != nil {
 		return fmt.Errorf("bind control socket %s: %w", socketPath, err)
@@ -205,6 +210,16 @@ func renderUse(resp *control.Response) error {
 		fmt.Printf("  %s: %s (db=%s) -> %s (db=%s) (closed %d connection(s))\n",
 			r.VirtualName, prev, r.PreviousDatabase,
 			r.Current, r.CurrentDatabase, r.ClosedConns)
+	}
+	if len(resp.Probes) > 0 {
+		fmt.Println("health (connect + auth + select 1):")
+		for _, p := range resp.Probes {
+			if p.OK {
+				fmt.Printf("  %s: OK (%s db=%s)\n", p.VirtualName, p.Addr, p.Database)
+			} else {
+				fmt.Printf("  %s: FAILED (%s) - %s\n", p.VirtualName, p.Addr, p.Err)
+			}
+		}
 	}
 	return nil
 }
