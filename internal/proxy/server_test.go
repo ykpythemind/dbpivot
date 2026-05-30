@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -532,6 +533,47 @@ func TestSwitchAll_InactiveDatabaseGetsCleanPgError(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "no active target") {
 		t.Errorf("body = %q, want 'no active target'", body)
+	}
+}
+
+// TestServer_CheckReachability verifies the serve-time TCP probe: every
+// declared target (not just the active one) is dialed, a live upstream logs
+// "upstream reachable", a dead endpoint logs "upstream unreachable", and the
+// probe never fails the caller (warn-and-continue).
+func TestServer_CheckReachability(t *testing.T) {
+	up := newFakeUpstream(t, "alice", "secret")
+	defer up.close()
+	deadPort := freePort(t) // closed listener -> connection refused (fast fail)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	cfg := &config.Config{
+		ListenPorts: map[string]int{config.AdapterPostgres: freePort(t)},
+		Databases: []config.Database{
+			{
+				Adapter:     config.AdapterPostgres,
+				VirtualName: "appdb",
+				Targets: []config.Target{
+					{Name: "local", Host: "127.0.0.1", Port: up.port, User: "alice", Password: "secret", Database: "app_real"},
+					{Name: "down", Host: "127.0.0.1", Port: deadPort, User: "u", Password: "p", Database: "x"},
+				},
+			},
+		},
+	}
+	s, err := New(cfg, "local", nil, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	s.CheckReachability()
+
+	out := buf.String()
+	if !strings.Contains(out, "upstream reachable") || !strings.Contains(out, "appdb.local") {
+		t.Errorf("expected reachable log for appdb.local; got:\n%s", out)
+	}
+	if !strings.Contains(out, "upstream unreachable") || !strings.Contains(out, "appdb.down") {
+		t.Errorf("expected unreachable log for appdb.down; got:\n%s", out)
 	}
 }
 

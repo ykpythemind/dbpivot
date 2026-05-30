@@ -93,6 +93,11 @@ func runServe() error {
 		return err
 	}
 
+	// Minimal startup check: TCP-reachability of every declared upstream.
+	// Warn-and-continue — the proxy dials upstreams lazily, so this is purely
+	// an operator heads-up, never a hard gate.
+	d.CheckReachability()
+
 	ln, err := control.Listen(socketPath)
 	if err != nil {
 		return fmt.Errorf("bind control socket %s: %w", socketPath, err)

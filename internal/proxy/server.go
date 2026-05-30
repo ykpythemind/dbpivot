@@ -246,6 +246,43 @@ func (e *SwitchPlanError) Error() string {
 	return fmt.Sprintf("database %q: %v", e.VirtualName, e.Err)
 }
 
+// CheckReachability does a minimal TCP dial to every upstream endpoint declared
+// by any database (deduped by host:port, across all targets — not just the
+// active one) and logs the result. It never fails: this is a passthrough proxy
+// that dials upstreams lazily on client connect, so an endpoint that is down at
+// serve time may well be up later. Unreachable endpoints are logged at WARN so
+// the operator notices, reachable ones at INFO. Dials run concurrently.
+func (s *Server) CheckReachability() {
+	// addr -> "virtual_name.target" references, deduped per endpoint.
+	refs := make(map[string][]string)
+	for name, d := range s.Databases() {
+		for _, t := range d.Targets() {
+			host, port := t.ResolveEndpoint(d.fwd)
+			if host == "" || port == 0 {
+				continue
+			}
+			addr := net.JoinHostPort(host, strconv.Itoa(port))
+			refs[addr] = append(refs[addr], name+"."+t.Name)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for addr := range refs {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			conn, err := net.DialTimeout("tcp", addr, dialTimeout)
+			if err != nil {
+				s.logger.Warn("upstream unreachable", "addr", addr, "refs", refs[addr], "err", err)
+				return
+			}
+			_ = conn.Close()
+			s.logger.Info("upstream reachable", "addr", addr, "refs", refs[addr])
+		}(addr)
+	}
+	wg.Wait()
+}
+
 // Start binds one listener per served adapter and runs an accept loop for each
 // concurrently. It returns once every listener has stopped accepting (typically
 // because of Shutdown), surfacing the first non-shutdown error.
