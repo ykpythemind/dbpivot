@@ -28,10 +28,19 @@ var (
 	flagServeTgt string
 )
 
+// Build metadata, injected at release time via -ldflags -X main.version=...
+// (GoReleaser sets these automatically). Defaults are for `go build`/`go install`.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	root := &cobra.Command{
 		Use:           "dbpivot",
 		Short:         "A switchable local DB proxy",
+		Version:       fmt.Sprintf("%s (commit %s, built %s)", version, commit, date),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
