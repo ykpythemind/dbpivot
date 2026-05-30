@@ -106,6 +106,18 @@ databases:
 
 ## 使い方
 
+### インストール
+
+[GitHub Releases](https://github.com/ykpythemind/dbpivot/releases) から OS/arch 別のビルド済みバイナリ (linux / darwin × amd64 / arm64) を取得できる。
+
+```bash
+# 例: macOS arm64
+curl -sSfL https://github.com/ykpythemind/dbpivot/releases/latest/download/dbpivot_<version>_darwin_arm64.tar.gz | tar xz
+./dbpivot --version
+```
+
+`checksums.txt` で `sha256` を検証できる。
+
 ### ビルド
 
 ```bash
