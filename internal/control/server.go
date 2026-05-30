@@ -20,6 +20,7 @@ type Daemon interface {
 	Databases() map[string]*proxy.Database
 	CurrentTarget() (string, map[string]string)
 	SwitchAll(target string, vars map[string]string) ([]proxy.SwitchResult, error)
+	ProbeActive() []proxy.ProbeResult
 	Addrs() map[string]string
 	IsClosed() bool
 }
@@ -131,10 +132,28 @@ func (s *Server) handleUse(c net.Conn, req *Request) {
 			Skipped:          r.Skipped,
 		}
 	}
+	// Health-check the newly-active targets (connect + auth + `select 1`).
+	// Warn-and-continue: a failed probe does not undo the switch — the result
+	// is reported to the operator both in the response and the daemon log.
+	probes := s.daemon.ProbeActive()
+	proxy.LogProbeResults(s.logger, probes)
+	wireProbes := make([]ProbeResult, len(probes))
+	for i, p := range probes {
+		wireProbes[i] = ProbeResult{
+			VirtualName: p.VirtualName,
+			Target:      p.Target,
+			Database:    p.Database,
+			Addr:        p.Addr,
+			OK:          p.OK,
+			Err:         p.Err,
+		}
+	}
+
 	s.writeResp(c, Response{
 		OK:       true,
 		Target:   req.Target,
 		Switched: wire,
+		Probes:   wireProbes,
 	})
 }
 

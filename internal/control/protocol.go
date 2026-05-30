@@ -22,6 +22,7 @@ type Response struct {
 	Target   string         `json:"target,omitempty"`
 	Switched []SwitchResult `json:"switched,omitempty"`
 	Missing  []string       `json:"missing,omitempty"`
+	Probes   []ProbeResult  `json:"probes,omitempty"`
 
 	// `status`
 	Ports         map[string]int   `json:"ports,omitempty"` // adapter -> listen port
@@ -41,6 +42,17 @@ type SwitchResult struct {
 	// receive a clean PG ErrorResponse until the next switch lands on a
 	// target it does declare.
 	Skipped bool `json:"skipped,omitempty"`
+}
+
+// ProbeResult reports a post-switch connect + auth + `select 1` health probe
+// against one database's active target.
+type ProbeResult struct {
+	VirtualName string `json:"virtual_name"`
+	Target      string `json:"target,omitempty"`
+	Database    string `json:"database,omitempty"`
+	Addr        string `json:"addr,omitempty"`
+	OK          bool   `json:"ok"`
+	Err         string `json:"err,omitempty"`
 }
 
 type DatabaseStatus struct {
