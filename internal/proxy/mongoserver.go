@@ -106,10 +106,10 @@ func (s *Server) routeMongo(client net.Conn, database *Database, db string, hdr 
 	}
 
 	// All authentication happens on this leg (the client was told auth is
-	// disabled). The credentials live in the upstream's auth database; dbpivot
-	// has no authSource config field yet, so AuthenticateUpstreamMongo defaults
-	// it to "admin" — the conventional home for MongoDB user credentials.
-	if err := AuthenticateUpstreamMongo(up, rt.User, rt.Password, ""); err != nil {
+	// disabled). The credentials live in the target's configured auth_source
+	// database; when it is empty AuthenticateUpstreamMongo defaults to "admin"
+	// — the conventional home for MongoDB user credentials.
+	if err := AuthenticateUpstreamMongo(up, rt.User, rt.Password, rt.AuthSource); err != nil {
 		_ = WriteMongoReply(client, hdr.OpCode, hdr.RequestID,
 			mongoErrorReply(fmt.Sprintf("upstream auth failed: %v", err), mongoErrHostUnreachable))
 		up.Close()

@@ -39,6 +39,14 @@ type Target struct {
 	Password string `yaml:"password"`
 	Database string `yaml:"database,omitempty"`
 
+	// AuthSource is the MongoDB authentication database the proxy uses for the
+	// upstream SCRAM login — the wire-level $db of the saslStart/saslContinue
+	// commands, equivalent to the connection-string authSource option. It
+	// defaults to "admin" (where MongoDB user credentials normally live) when
+	// empty. Only the mongodb adapter consults it; it is ignored by the
+	// postgres/mysql adapters.
+	AuthSource string `yaml:"auth_source,omitempty"`
+
 	// SSLMode controls the proxy→upstream TLS leg. v1 supports:
 	//   "disable" (default) — connect in plaintext (local PG / trusted networks)
 	//   "require"           — negotiate TLS (SSLRequest) but skip cert verification,
@@ -292,6 +300,19 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 
 			if t.SSLMode != "" && !isSupportedSSLMode(t.SSLMode) {
 				return fmt.Errorf("database %q target %q: unsupported sslmode %q (supported: %v)", d.VirtualName, t.Name, t.SSLMode, SupportedSSLModes)
+			}
+
+			// auth_source is a MongoDB-only concept (the upstream SCRAM auth
+			// database). When set it must be a valid identifier; warn if it
+			// appears on a non-mongodb database where it has no effect.
+			if t.AuthSource != "" {
+				if !ValidIdentifier(t.AuthSource) {
+					return fmt.Errorf("database %q target %q: auth_source %q is not a valid identifier", d.VirtualName, t.Name, t.AuthSource)
+				}
+				if d.Adapter != AdapterMongo && logger != nil {
+					logger.Warn("auth_source is only used by the mongodb adapter and is ignored here",
+						"virtual_name", d.VirtualName, "target", t.Name, "adapter", d.Adapter)
+				}
 			}
 
 			// Plain (no-variable) target.database must still be a valid identifier.

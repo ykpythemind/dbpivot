@@ -15,12 +15,13 @@ import (
 // reads each command, records the $db and command name it saw, and replies ok:1
 // echoing the command name. It is the MongoDB analog of fakeUpstream.
 type fakeMongod struct {
-	ln       net.Listener
-	port     int
-	user     string
-	password string
-	gotDB    atomic.Value // string
-	gotCmd   atomic.Value // string (command name)
+	ln        net.Listener
+	port      int
+	user      string
+	password  string
+	gotDB     atomic.Value // string
+	gotCmd    atomic.Value // string (command name)
+	gotAuthDB atomic.Value // string (saslStart $db = upstream auth database)
 }
 
 func newFakeMongod(t *testing.T, user, password string) *fakeMongod {
@@ -46,9 +47,11 @@ func (fm *fakeMongod) acceptLoop() {
 
 func (fm *fakeMongod) serve(c net.Conn) {
 	defer c.Close()
-	if err := serveFakeMongoSCRAM(c, fm.user, fm.password, true); err != nil {
+	authDB, err := serveFakeMongoSCRAM(c, fm.user, fm.password, true)
+	if err != nil {
 		return
 	}
+	fm.gotAuthDB.Store(authDB)
 	for {
 		hdr, body, err := ReadMongoMessage(c)
 		if err != nil {
@@ -162,6 +165,49 @@ func TestServer_Mongo_HelloRouteAndForward(t *testing.T) {
 	}
 	if got, _ := up.gotCmd.Load().(string); got != "ping" {
 		t.Errorf("upstream received command = %q, want ping", got)
+	}
+}
+
+// TestServer_Mongo_AuthSourceUsed verifies the configured target auth_source is
+// the $db the proxy runs upstream SCRAM against, and that an empty auth_source
+// defaults to "admin".
+func TestServer_Mongo_AuthSourceUsed(t *testing.T) {
+	cases := []struct {
+		name       string
+		authSource string
+		wantAuthDB string
+	}{
+		{"explicit", "users_db", "users_db"},
+		{"default_admin", "", "admin"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := newFakeMongod(t, "alice", "secret")
+			defer up.close()
+
+			cfg := mongoTestConfig(t, up)
+			cfg.Databases[0].Targets[0].AuthSource = tc.authSource
+
+			s := startServer(t, cfg)
+			defer s.Shutdown(context.Background())
+
+			c, err := net.Dial("tcp", s.AddrFor(config.AdapterMongo))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+
+			// A command on the configured db triggers routing + upstream auth.
+			sendMongoCmd(t, c, 1, BSON{{Key: "ping", Value: int32(1)}, {Key: "$db", Value: "appdb"}})
+			reply, _ := readMongoReply(t, c)
+			if !mongoReplyOK(reply) {
+				t.Fatalf("routed command not ok:1: %+v", reply)
+			}
+
+			if got, _ := up.gotAuthDB.Load().(string); got != tc.wantAuthDB {
+				t.Errorf("upstream SCRAM auth $db = %q, want %q", got, tc.wantAuthDB)
+			}
+		})
 	}
 }
 

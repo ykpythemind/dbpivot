@@ -17,7 +17,7 @@ import (
 // Errors are reported via errCh; conn is closed when the exchange ends.
 func fakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange bool, errCh chan<- error) {
 	defer conn.Close()
-	if err := serveFakeMongoSCRAM(conn, user, password, skipEmptyExchange); err != nil {
+	if _, err := serveFakeMongoSCRAM(conn, user, password, skipEmptyExchange); err != nil {
 		errCh <- err
 	}
 }
@@ -26,18 +26,20 @@ func fakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange bool
 // OP_MSG on conn and returns when the conversation completes, leaving conn open
 // for any command phase that follows. It does not close conn — callers that
 // only need the auth (fakeMongoSCRAM) close it themselves, while the server-level
-// fake mongod keeps the connection to serve the forwarded command.
-func serveFakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange bool) error {
+// fake mongod keeps the connection to serve the forwarded command. It returns
+// the authentication database ($db) the saslStart was sent against so callers
+// can assert how the upstream auth was scoped.
+func serveFakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange bool) (authDB string, err error) {
 	// Build the credential lookup the SCRAM server needs from a client computing
 	// the stored keys for a fixed salt/iteration count.
 	kf := scram.KeyFactors{Salt: "Zm9vYmFyc2FsdA==", Iters: 4096}
 	credClient, err := scram.SHA256.NewClient(user, password, "")
 	if err != nil {
-		return fmt.Errorf("server cred client: %w", err)
+		return "", fmt.Errorf("server cred client: %w", err)
 	}
 	stored, err := credClient.GetStoredCredentialsWithError(kf)
 	if err != nil {
-		return fmt.Errorf("server stored creds: %w", err)
+		return "", fmt.Errorf("server stored creds: %w", err)
 	}
 	srv, err := scram.SHA256.NewServer(func(u string) (scram.StoredCredentials, error) {
 		if u != user {
@@ -46,7 +48,7 @@ func serveFakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange
 		return stored, nil
 	})
 	if err != nil {
-		return fmt.Errorf("server: %w", err)
+		return "", fmt.Errorf("server: %w", err)
 	}
 	sconv := srv.NewConversation()
 	const convID = int32(1)
@@ -73,43 +75,45 @@ func serveFakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange
 		}))
 	}
 
-	// saslStart -> server-first.
-	reqID, clientFirst, _, err := readPayload()
+	// saslStart -> server-first. The saslStart's $db is the upstream auth
+	// database the proxy chose (default "admin" or the configured auth_source).
+	reqID, clientFirst, startDoc, err := readPayload()
 	if err != nil {
-		return fmt.Errorf("read saslStart: %w", err)
+		return "", fmt.Errorf("read saslStart: %w", err)
 	}
+	authDB, _ = lookupBSONString(startDoc, "$db")
 	serverFirst, err := sconv.Step(string(clientFirst))
 	if err != nil {
-		return fmt.Errorf("server step1: %w", err)
+		return authDB, fmt.Errorf("server step1: %w", err)
 	}
 	if err := writeReply(reqID, []byte(serverFirst), false); err != nil {
-		return fmt.Errorf("write server-first: %w", err)
+		return authDB, fmt.Errorf("write server-first: %w", err)
 	}
 
 	// saslContinue -> server-final.
 	reqID, clientFinal, _, err := readPayload()
 	if err != nil {
-		return fmt.Errorf("read saslContinue: %w", err)
+		return authDB, fmt.Errorf("read saslContinue: %w", err)
 	}
 	serverFinal, err := sconv.Step(string(clientFinal))
 	if err != nil {
-		return fmt.Errorf("server step2: %w", err)
+		return authDB, fmt.Errorf("server step2: %w", err)
 	}
 	if err := writeReply(reqID, []byte(serverFinal), skipEmptyExchange); err != nil {
-		return fmt.Errorf("write server-final: %w", err)
+		return authDB, fmt.Errorf("write server-final: %w", err)
 	}
 
 	// Pre-4.4 behavior: one extra empty saslContinue concludes the exchange.
 	if !skipEmptyExchange {
 		reqID, _, _, err := readPayload()
 		if err != nil {
-			return fmt.Errorf("read finalize saslContinue: %w", err)
+			return authDB, fmt.Errorf("read finalize saslContinue: %w", err)
 		}
 		if err := writeReply(reqID, nil, true); err != nil {
-			return fmt.Errorf("write finalize: %w", err)
+			return authDB, fmt.Errorf("write finalize: %w", err)
 		}
 	}
-	return nil
+	return authDB, nil
 }
 
 func TestAuthenticateUpstreamMongo_Success(t *testing.T) {

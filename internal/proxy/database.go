@@ -12,13 +12,14 @@ import (
 // ResolvedTarget is a snapshot of a target with all variables and forward
 // references resolved. It is what handlers actually use to dial upstreams.
 type ResolvedTarget struct {
-	Name     string
-	Host     string
-	Port     int
-	User     string
-	Password string
-	Database string
-	SSLMode  string
+	Name       string
+	Host       string
+	Port       int
+	User       string
+	Password   string
+	Database   string
+	SSLMode    string
+	AuthSource string
 }
 
 // Conn is a registered (client, upstream) pair guarded by a once-only close.
@@ -123,13 +124,14 @@ func (d *Database) ResolveTarget(name string, vars map[string]string) (ResolvedT
 	}
 	host, port := t.ResolveEndpoint(d.fwd)
 	return ResolvedTarget{
-		Name:     t.Name,
-		Host:     host,
-		Port:     port,
-		User:     t.User,
-		Password: t.Password,
-		Database: resolvedDB,
-		SSLMode:  t.SSLMode,
+		Name:       t.Name,
+		Host:       host,
+		Port:       port,
+		User:       t.User,
+		Password:   t.Password,
+		Database:   resolvedDB,
+		SSLMode:    t.SSLMode,
+		AuthSource: t.AuthSource,
 	}, nil, nil
 }
 
