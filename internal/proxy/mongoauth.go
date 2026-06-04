@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"runtime"
 
 	"github.com/xdg-go/scram"
 )
@@ -46,6 +47,18 @@ func AuthenticateUpstreamMongo(conn net.Conn, user, password, authDB string) err
 	if authDB == "" {
 		authDB = "admin"
 	}
+
+	// MongoDB requires the connection handshake — a `hello` carrying client
+	// metadata — as the very first command on a connection: a real mongod closes
+	// the connection outright if the first command is anything else (e.g.
+	// saslStart), surfacing here as an EOF reading the saslStart reply. So
+	// perform the handshake before driving SCRAM. Only ok:1 matters; the proxy
+	// already committed to a wire version in its client-facing hello, so the
+	// upstream's advertised limits are intentionally ignored.
+	if err := mongoUpstreamHandshake(conn, authDB); err != nil {
+		return fmt.Errorf("mongo upstream handshake: %w", err)
+	}
+
 	client, err := scram.SHA256.NewClient(user, password, "")
 	if err != nil {
 		return fmt.Errorf("mongo scram client: %w", err)
@@ -123,6 +136,47 @@ func AuthenticateUpstreamMongo(conn net.Conn, user, password, authDB string) err
 		}
 	}
 	return nil
+}
+
+// mongoProxyDriverVersion is the version dbpivot reports as the "driver" in its
+// upstream handshake client metadata. It is cosmetic (it surfaces in the
+// upstream's logs / db.currentOp) and need not track the dbpivot binary version.
+const mongoProxyDriverVersion = "1.0"
+
+// mongoUpstreamHandshake performs the mandatory MongoDB connection handshake on
+// a fresh upstream connection: a single `hello` carrying client metadata, which
+// a real mongod requires before it will accept any other command (saslStart
+// included). db is the database the hello runs against (the auth database is a
+// fine choice; hello ignores it). It errors unless the server replies ok:1.
+func mongoUpstreamHandshake(conn net.Conn, db string) error {
+	reply, err := mongoCommandRoundTrip(conn, BSON{
+		{Key: "hello", Value: int32(1)},
+		{Key: "client", Value: mongoUpstreamClientMetadata()},
+		{Key: "$db", Value: db},
+	})
+	if err != nil {
+		return err
+	}
+	if !mongoReplyOK(reply) {
+		return mongoReplyError(reply)
+	}
+	return nil
+}
+
+// mongoUpstreamClientMetadata is the client metadata dbpivot presents to the
+// upstream in its handshake hello. MongoDB records it (visible in server logs
+// and db.currentOp) and accepts it only on the first hello of a connection. It
+// identifies the proxy rather than impersonating the connecting client.
+func mongoUpstreamClientMetadata() BSON {
+	return BSON{
+		{Key: "driver", Value: BSON{
+			{Key: "name", Value: "dbpivot"},
+			{Key: "version", Value: mongoProxyDriverVersion},
+		}},
+		{Key: "os", Value: BSON{
+			{Key: "type", Value: runtime.GOOS},
+		}},
+	}
 }
 
 // mongoCommandRoundTrip sends cmd as a single-section OP_MSG command and reads

@@ -75,6 +75,20 @@ func serveFakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange
 		}))
 	}
 
+	// The proxy now performs the mandatory connection handshake (a hello)
+	// before saslStart, mirroring what a real mongod requires; consume it and
+	// answer with a standalone hello reply so auth can proceed.
+	helloID, _, helloDoc, err := readPayload()
+	if err != nil {
+		return "", fmt.Errorf("read handshake hello: %w", err)
+	}
+	if !IsHelloCommand(helloDoc) {
+		return "", fmt.Errorf("expected handshake hello first, got command %q", MongoCommand{Doc: helloDoc}.CommandName())
+	}
+	if err := WriteMongoMessage(conn, 0, helloID, OpMsg, EncodeOpMsgBody(0, BuildHelloReply(1, time.Now()))); err != nil {
+		return "", fmt.Errorf("write handshake hello reply: %w", err)
+	}
+
 	// saslStart -> server-first. The saslStart's $db is the upstream auth
 	// database the proxy chose (default "admin" or the configured auth_source).
 	reqID, clientFirst, startDoc, err := readPayload()
@@ -181,7 +195,15 @@ func TestAuthenticateUpstreamMongo_CommandError(t *testing.T) {
 	client, server := net.Pipe()
 	go func() {
 		defer server.Close()
-		// Read the saslStart, then reject with an ok:0 error reply.
+		// First answer the mandatory handshake hello with an ok:1 reply.
+		hhdr, _, err := ReadMongoMessage(server)
+		if err != nil {
+			return
+		}
+		if err := WriteMongoMessage(server, 0, hhdr.RequestID, OpMsg, EncodeOpMsgBody(0, BuildHelloReply(1, time.Now()))); err != nil {
+			return
+		}
+		// Then read the saslStart and reject it with an ok:0 error reply.
 		hdr, _, err := ReadMongoMessage(server)
 		if err != nil {
 			return
