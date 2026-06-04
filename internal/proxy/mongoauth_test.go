@@ -17,20 +17,27 @@ import (
 // Errors are reported via errCh; conn is closed when the exchange ends.
 func fakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange bool, errCh chan<- error) {
 	defer conn.Close()
-	fail := func(format string, a ...any) { errCh <- fmt.Errorf(format, a...) }
+	if err := serveFakeMongoSCRAM(conn, user, password, skipEmptyExchange); err != nil {
+		errCh <- err
+	}
+}
 
+// serveFakeMongoSCRAM plays the server side of one SCRAM-SHA-256 exchange over
+// OP_MSG on conn and returns when the conversation completes, leaving conn open
+// for any command phase that follows. It does not close conn — callers that
+// only need the auth (fakeMongoSCRAM) close it themselves, while the server-level
+// fake mongod keeps the connection to serve the forwarded command.
+func serveFakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange bool) error {
 	// Build the credential lookup the SCRAM server needs from a client computing
 	// the stored keys for a fixed salt/iteration count.
 	kf := scram.KeyFactors{Salt: "Zm9vYmFyc2FsdA==", Iters: 4096}
 	credClient, err := scram.SHA256.NewClient(user, password, "")
 	if err != nil {
-		fail("server cred client: %w", err)
-		return
+		return fmt.Errorf("server cred client: %w", err)
 	}
 	stored, err := credClient.GetStoredCredentialsWithError(kf)
 	if err != nil {
-		fail("server stored creds: %w", err)
-		return
+		return fmt.Errorf("server stored creds: %w", err)
 	}
 	srv, err := scram.SHA256.NewServer(func(u string) (scram.StoredCredentials, error) {
 		if u != user {
@@ -39,8 +46,7 @@ func fakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange bool
 		return stored, nil
 	})
 	if err != nil {
-		fail("server: %w", err)
-		return
+		return fmt.Errorf("server: %w", err)
 	}
 	sconv := srv.NewConversation()
 	const convID = int32(1)
@@ -70,47 +76,40 @@ func fakeMongoSCRAM(conn net.Conn, user, password string, skipEmptyExchange bool
 	// saslStart -> server-first.
 	reqID, clientFirst, _, err := readPayload()
 	if err != nil {
-		fail("read saslStart: %w", err)
-		return
+		return fmt.Errorf("read saslStart: %w", err)
 	}
 	serverFirst, err := sconv.Step(string(clientFirst))
 	if err != nil {
-		fail("server step1: %w", err)
-		return
+		return fmt.Errorf("server step1: %w", err)
 	}
 	if err := writeReply(reqID, []byte(serverFirst), false); err != nil {
-		fail("write server-first: %w", err)
-		return
+		return fmt.Errorf("write server-first: %w", err)
 	}
 
 	// saslContinue -> server-final.
 	reqID, clientFinal, _, err := readPayload()
 	if err != nil {
-		fail("read saslContinue: %w", err)
-		return
+		return fmt.Errorf("read saslContinue: %w", err)
 	}
 	serverFinal, err := sconv.Step(string(clientFinal))
 	if err != nil {
-		fail("server step2: %w", err)
-		return
+		return fmt.Errorf("server step2: %w", err)
 	}
 	if err := writeReply(reqID, []byte(serverFinal), skipEmptyExchange); err != nil {
-		fail("write server-final: %w", err)
-		return
+		return fmt.Errorf("write server-final: %w", err)
 	}
 
 	// Pre-4.4 behavior: one extra empty saslContinue concludes the exchange.
 	if !skipEmptyExchange {
 		reqID, _, _, err := readPayload()
 		if err != nil {
-			fail("read finalize saslContinue: %w", err)
-			return
+			return fmt.Errorf("read finalize saslContinue: %w", err)
 		}
 		if err := writeReply(reqID, nil, true); err != nil {
-			fail("write finalize: %w", err)
-			return
+			return fmt.Errorf("write finalize: %w", err)
 		}
 	}
+	return nil
 }
 
 func TestAuthenticateUpstreamMongo_Success(t *testing.T) {

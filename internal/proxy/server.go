@@ -359,6 +359,8 @@ func (s *Server) handleConn(client net.Conn, adapter string) {
 	switch adapter {
 	case config.AdapterMySQL:
 		err = s.dispatchMySQL(client)
+	case config.AdapterMongo:
+		err = s.dispatchMongo(client)
 	default:
 		err = s.dispatch(client)
 	}

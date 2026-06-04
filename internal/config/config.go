@@ -49,7 +49,8 @@ type Target struct {
 
 type Database struct {
 	// Adapter selects the wire protocol used for both the client→proxy and
-	// proxy→upstream legs of this database (AdapterPostgres or AdapterMySQL).
+	// proxy→upstream legs of this database (AdapterPostgres, AdapterMySQL, or
+	// AdapterMongo).
 	// The field is required (no default) so configs are explicit about which
 	// protocol they assume. All databases in one config must share an adapter
 	// since they share a single listen port.
@@ -58,10 +59,11 @@ type Database struct {
 	Targets     []Target `yaml:"targets"`
 }
 
-// Adapter values. New adapters added later (mongo, ...) extend this set.
+// Adapter values. New adapters added later extend this set.
 const (
 	AdapterPostgres = "postgres"
 	AdapterMySQL    = "mysql"
+	AdapterMongo    = "mongodb"
 )
 
 // SSL modes for the proxy→upstream leg.
@@ -75,7 +77,7 @@ var SupportedSSLModes = []string{SSLModeDisable, SSLModeRequire}
 
 // SupportedAdapters lists every adapter the validator accepts. Kept sorted
 // for stable error messages.
-var SupportedAdapters = []string{AdapterMySQL, AdapterPostgres}
+var SupportedAdapters = []string{AdapterMongo, AdapterMySQL, AdapterPostgres}
 
 type Config struct {
 	// ListenHost is the bind interface for every listen port (defaults to

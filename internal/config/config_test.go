@@ -49,6 +49,15 @@ func TestValidate_MySQLAdapterOK(t *testing.T) {
 	}
 }
 
+func TestValidate_MongoAdapterOK(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Databases[0].Adapter = AdapterMongo
+	cfg.ListenPorts = map[string]int{AdapterMongo: 27017}
+	if err := Validate(cfg, nil); err != nil {
+		t.Fatalf("all-mongo config should validate: %v", err)
+	}
+}
+
 func TestValidate_MySQLSSLModeRequireOK(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Databases[0].Adapter = AdapterMySQL
@@ -86,7 +95,7 @@ func TestValidate_Errors(t *testing.T) {
 		{"no_listen_ports", func(c *Config) { c.ListenPorts = nil }, "listen_ports must define"},
 		{"listen_port_zero", func(c *Config) { c.ListenPorts[AdapterPostgres] = 0 }, "must be in"},
 		{"listen_port_too_large", func(c *Config) { c.ListenPorts[AdapterPostgres] = 70000 }, "must be in"},
-		{"listen_port_unsupported_adapter", func(c *Config) { c.ListenPorts["mongodb"] = 27017 }, "unsupported adapter"},
+		{"listen_port_unsupported_adapter", func(c *Config) { c.ListenPorts["oracle"] = 1521 }, "unsupported adapter"},
 		{"listen_port_duplicate", func(c *Config) { c.ListenPorts[AdapterMySQL] = 6432 }, "both use port"},
 		{"adapter_no_listen_port", func(c *Config) {
 			second := c.Databases[0]
@@ -101,7 +110,7 @@ func TestValidate_Errors(t *testing.T) {
 			c.Databases = append(c.Databases, c.Databases[0])
 		}, "duplicate virtual_name"},
 		{"adapter_missing", func(c *Config) { c.Databases[0].Adapter = "" }, "adapter is required"},
-		{"adapter_unsupported", func(c *Config) { c.Databases[0].Adapter = "mongodb" }, "unsupported adapter"},
+		{"adapter_unsupported", func(c *Config) { c.Databases[0].Adapter = "oracle" }, "unsupported adapter"},
 		{"no_targets", func(c *Config) { c.Databases[0].Targets = nil }, "no targets"},
 		{"duplicate_target", func(c *Config) {
 			c.Databases[0].Targets = append(c.Databases[0].Targets, c.Databases[0].Targets[0])

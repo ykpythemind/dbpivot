@@ -128,6 +128,15 @@ func ReadMongoCommand(r io.Reader) (MongoCommand, error) {
 	if err != nil {
 		return MongoCommand{}, err
 	}
+	return decodeMongoCommand(hdr, body)
+}
+
+// decodeMongoCommand decodes an already-read message (header + raw body) into a
+// MongoCommand. It is split out from ReadMongoCommand so the connection
+// dispatcher can read the raw frame, peek at the routing key, and still forward
+// the original bytes verbatim to the upstream — preserving any OP_MSG kind-1
+// document sequences or trailing checksum that the decoded view drops.
+func decodeMongoCommand(hdr MsgHeader, body []byte) (MongoCommand, error) {
 	switch hdr.OpCode {
 	case OpMsg:
 		_, doc, err := ParseOpMsg(body)
