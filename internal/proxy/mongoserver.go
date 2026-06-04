@@ -60,12 +60,19 @@ func (s *Server) dispatchMongo(client net.Conn) error {
 		}
 
 		// Not routable yet. Answer hello/isMaster ourselves (it always targets
-		// `admin`); reject anything else with a command error. Serving the
-		// broader set of pre-routing admin commands (ping, buildInfo, ...) would
-		// need a local responder and is left to a later iteration.
+		// `admin`), and likewise answer the admin-command chatter drivers and
+		// mongosh send between the handshake and their first user command
+		// (ping, buildInfo, getParameter, getLog, ...) so the connection can
+		// finish establishing. Anything else is rejected with a command error.
 		if IsHelloCommand(cmd.Doc) {
 			if err := WriteMongoReply(client, hdr.OpCode, hdr.RequestID, BuildHelloReply(connID, time.Now())); err != nil {
 				return fmt.Errorf("mongo write hello reply: %w", err)
+			}
+			continue
+		}
+		if reply, ok := BuildAdminCommandReply(cmd, client.RemoteAddr().String()); ok {
+			if err := WriteMongoReply(client, hdr.OpCode, hdr.RequestID, reply); err != nil {
+				return fmt.Errorf("mongo write admin reply: %w", err)
 			}
 			continue
 		}

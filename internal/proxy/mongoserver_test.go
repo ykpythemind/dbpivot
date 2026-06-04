@@ -165,6 +165,46 @@ func TestServer_Mongo_HelloRouteAndForward(t *testing.T) {
 	}
 }
 
+// TestServer_Mongo_AdminChatterAnsweredLocally verifies the pre-routing admin
+// commands real drivers/mongosh send on $db:admin (ping, buildInfo, ...) are
+// answered locally with ok:1 — not forwarded and not ok:0-errored — so the
+// handshake completes before any command names a configured database.
+func TestServer_Mongo_AdminChatterAnsweredLocally(t *testing.T) {
+	up := newFakeMongod(t, "alice", "secret")
+	defer up.close()
+
+	s := startServer(t, mongoTestConfig(t, up))
+	defer s.Shutdown(context.Background())
+
+	c, err := net.Dial("tcp", s.AddrFor(config.AdapterMongo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	// hello first, then a burst of admin probes on admin — all local, ok:1.
+	sendMongoCmd(t, c, 1, BSON{{Key: "hello", Value: int32(1)}, {Key: "$db", Value: "admin"}})
+	readMongoReply(t, c)
+
+	var reqID int32 = 2
+	for _, name := range []string{"ping", "buildInfo", "whatsmyuri", "getLog", "connectionStatus"} {
+		sendMongoCmd(t, c, reqID, BSON{{Key: name, Value: int32(1)}, {Key: "$db", Value: "admin"}})
+		reply, respTo := readMongoReply(t, c)
+		if respTo != reqID {
+			t.Errorf("%s ResponseTo = %d, want %d", name, respTo, reqID)
+		}
+		if !mongoReplyOK(reply) {
+			t.Errorf("%s not answered ok:1 locally: %+v", name, reply)
+		}
+		reqID++
+	}
+
+	// None of the admin chatter should have reached the upstream.
+	if got, _ := up.gotCmd.Load().(string); got != "" {
+		t.Errorf("upstream saw command %q, want none (admin chatter must stay local)", got)
+	}
+}
+
 // TestServer_Mongo_UnknownDatabaseErrors verifies a command naming an
 // unconfigured database gets an ok:0 error and the connection stays open so a
 // subsequent hello is still served.
