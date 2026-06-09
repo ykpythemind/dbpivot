@@ -49,6 +49,42 @@ func TestValidate_MySQLAdapterOK(t *testing.T) {
 	}
 }
 
+func TestValidate_MongoAdapterOK(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Databases[0].Adapter = AdapterMongo
+	cfg.ListenPorts = map[string]int{AdapterMongo: 27017}
+	if err := Validate(cfg, nil); err != nil {
+		t.Fatalf("all-mongo config should validate: %v", err)
+	}
+}
+
+func TestValidate_MongoAuthSourceOK(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Databases[0].Adapter = AdapterMongo
+	cfg.ListenPorts = map[string]int{AdapterMongo: 27017}
+	cfg.Databases[0].Targets[0].AuthSource = "admin"
+	cfg.Databases[0].Targets[1].AuthSource = "app_users"
+	if err := Validate(cfg, nil); err != nil {
+		t.Fatalf("mongo auth_source should validate: %v", err)
+	}
+}
+
+// TestValidate_AuthSourceWarnsOnNonMongo verifies auth_source is accepted but
+// flagged as ignored when set on a non-mongodb database.
+func TestValidate_AuthSourceWarnsOnNonMongo(t *testing.T) {
+	cfg := baseCfg() // postgres adapter
+	cfg.Databases[0].Targets[0].AuthSource = "admin"
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	if err := Validate(cfg, logger); err != nil {
+		t.Fatalf("auth_source on a postgres db should warn, not error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "auth_source is only used by the mongodb adapter") {
+		t.Errorf("expected warning about ignored auth_source, got: %q", buf.String())
+	}
+}
+
 func TestValidate_MySQLSSLModeRequireOK(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Databases[0].Adapter = AdapterMySQL
@@ -86,7 +122,7 @@ func TestValidate_Errors(t *testing.T) {
 		{"no_listen_ports", func(c *Config) { c.ListenPorts = nil }, "listen_ports must define"},
 		{"listen_port_zero", func(c *Config) { c.ListenPorts[AdapterPostgres] = 0 }, "must be in"},
 		{"listen_port_too_large", func(c *Config) { c.ListenPorts[AdapterPostgres] = 70000 }, "must be in"},
-		{"listen_port_unsupported_adapter", func(c *Config) { c.ListenPorts["mongodb"] = 27017 }, "unsupported adapter"},
+		{"listen_port_unsupported_adapter", func(c *Config) { c.ListenPorts["oracle"] = 1521 }, "unsupported adapter"},
 		{"listen_port_duplicate", func(c *Config) { c.ListenPorts[AdapterMySQL] = 6432 }, "both use port"},
 		{"adapter_no_listen_port", func(c *Config) {
 			second := c.Databases[0]
@@ -101,7 +137,7 @@ func TestValidate_Errors(t *testing.T) {
 			c.Databases = append(c.Databases, c.Databases[0])
 		}, "duplicate virtual_name"},
 		{"adapter_missing", func(c *Config) { c.Databases[0].Adapter = "" }, "adapter is required"},
-		{"adapter_unsupported", func(c *Config) { c.Databases[0].Adapter = "mongodb" }, "unsupported adapter"},
+		{"adapter_unsupported", func(c *Config) { c.Databases[0].Adapter = "oracle" }, "unsupported adapter"},
 		{"no_targets", func(c *Config) { c.Databases[0].Targets = nil }, "no targets"},
 		{"duplicate_target", func(c *Config) {
 			c.Databases[0].Targets = append(c.Databases[0].Targets, c.Databases[0].Targets[0])
@@ -120,6 +156,9 @@ func TestValidate_Errors(t *testing.T) {
 		{"plain_target_database_invalid", func(c *Config) {
 			c.Databases[0].Targets[0].Database = "bad name"
 		}, "not a valid identifier"},
+		{"auth_source_invalid", func(c *Config) {
+			c.Databases[0].Targets[0].AuthSource = "bad source"
+		}, "auth_source"},
 		{"forward_target_bad_port", func(c *Config) {
 			c.ForwardTargets["x"] = ForwardTarget{Host: "h", Port: 0}
 		}, "port out of range"},

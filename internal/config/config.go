@@ -39,6 +39,14 @@ type Target struct {
 	Password string `yaml:"password"`
 	Database string `yaml:"database,omitempty"`
 
+	// AuthSource is the MongoDB authentication database the proxy uses for the
+	// upstream SCRAM login — the wire-level $db of the saslStart/saslContinue
+	// commands, equivalent to the connection-string authSource option. It
+	// defaults to "admin" (where MongoDB user credentials normally live) when
+	// empty. Only the mongodb adapter consults it; it is ignored by the
+	// postgres/mysql adapters.
+	AuthSource string `yaml:"auth_source,omitempty"`
+
 	// SSLMode controls the proxy→upstream TLS leg. v1 supports:
 	//   "disable" (default) — connect in plaintext (local PG / trusted networks)
 	//   "require"           — negotiate TLS (SSLRequest) but skip cert verification,
@@ -49,7 +57,8 @@ type Target struct {
 
 type Database struct {
 	// Adapter selects the wire protocol used for both the client→proxy and
-	// proxy→upstream legs of this database (AdapterPostgres or AdapterMySQL).
+	// proxy→upstream legs of this database (AdapterPostgres, AdapterMySQL, or
+	// AdapterMongo).
 	// The field is required (no default) so configs are explicit about which
 	// protocol they assume. All databases in one config must share an adapter
 	// since they share a single listen port.
@@ -58,10 +67,11 @@ type Database struct {
 	Targets     []Target `yaml:"targets"`
 }
 
-// Adapter values. New adapters added later (mongo, ...) extend this set.
+// Adapter values. New adapters added later extend this set.
 const (
 	AdapterPostgres = "postgres"
 	AdapterMySQL    = "mysql"
+	AdapterMongo    = "mongodb"
 )
 
 // SSL modes for the proxy→upstream leg.
@@ -75,7 +85,7 @@ var SupportedSSLModes = []string{SSLModeDisable, SSLModeRequire}
 
 // SupportedAdapters lists every adapter the validator accepts. Kept sorted
 // for stable error messages.
-var SupportedAdapters = []string{AdapterMySQL, AdapterPostgres}
+var SupportedAdapters = []string{AdapterMongo, AdapterMySQL, AdapterPostgres}
 
 type Config struct {
 	// ListenHost is the bind interface for every listen port (defaults to
@@ -290,6 +300,19 @@ func Validate(cfg *Config, logger *slog.Logger) error {
 
 			if t.SSLMode != "" && !isSupportedSSLMode(t.SSLMode) {
 				return fmt.Errorf("database %q target %q: unsupported sslmode %q (supported: %v)", d.VirtualName, t.Name, t.SSLMode, SupportedSSLModes)
+			}
+
+			// auth_source is a MongoDB-only concept (the upstream SCRAM auth
+			// database). When set it must be a valid identifier; warn if it
+			// appears on a non-mongodb database where it has no effect.
+			if t.AuthSource != "" {
+				if !ValidIdentifier(t.AuthSource) {
+					return fmt.Errorf("database %q target %q: auth_source %q is not a valid identifier", d.VirtualName, t.Name, t.AuthSource)
+				}
+				if d.Adapter != AdapterMongo && logger != nil {
+					logger.Warn("auth_source is only used by the mongodb adapter and is ignored here",
+						"virtual_name", d.VirtualName, "target", t.Name, "adapter", d.Adapter)
+				}
 			}
 
 			// Plain (no-variable) target.database must still be a valid identifier.
